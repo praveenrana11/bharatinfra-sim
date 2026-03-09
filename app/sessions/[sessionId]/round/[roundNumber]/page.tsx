@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
@@ -129,8 +129,22 @@ const stepTitles = [
 ] as const;
 
 const ROUND_LOCK_WINDOW_MINUTES = 35;
+const LATE_PENALTY_PER_MINUTE = 2;
+const LATE_PENALTY_CAP = 80;
 
 type StepIndex = 0 | 1 | 2 | 3 | 4;
+type RoundClockSource = "shared" | "fallback";
+
+type LatePenaltyResult = {
+  minutesLate: number;
+  pointsPenalty: number;
+  stakeholderPenalty: number;
+  extensionMode: boolean;
+};
+
+function createInitialStepDurations(): Record<StepIndex, number> {
+  return { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 };
+}
 
 type ExtendedDecisionForm = DecisionDraft & DecisionProfile;
 
@@ -491,6 +505,45 @@ function formatClock(ms: number) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function computeLatePenalty(
+  deadlineIso: string | null,
+  submittedIso: string,
+  clockSource: RoundClockSource
+): LatePenaltyResult {
+  if (!deadlineIso || clockSource !== "shared") {
+    return {
+      minutesLate: 0,
+      pointsPenalty: 0,
+      stakeholderPenalty: 0,
+      extensionMode: false,
+    };
+  }
+
+  const deadlineMs = Date.parse(deadlineIso);
+  const submittedMs = Date.parse(submittedIso);
+  const deltaMs = submittedMs - deadlineMs;
+
+  if (!Number.isFinite(deadlineMs) || !Number.isFinite(submittedMs) || deltaMs <= 0) {
+    return {
+      minutesLate: 0,
+      pointsPenalty: 0,
+      stakeholderPenalty: 0,
+      extensionMode: false,
+    };
+  }
+
+  const minutesLate = Math.max(1, Math.ceil(deltaMs / 60000));
+  const pointsPenalty = Math.min(LATE_PENALTY_CAP, minutesLate * LATE_PENALTY_PER_MINUTE);
+  const stakeholderPenalty = Math.min(12, Math.ceil(minutesLate / 4));
+
+  return {
+    minutesLate,
+    pointsPenalty,
+    stakeholderPenalty,
+    extensionMode: true,
+  };
+}
+
 function ProjectionBar({
   label,
   value,
@@ -548,7 +601,7 @@ export default function RoundDecisionPage() {
 
   const [clockNow, setClockNow] = useState(Date.now());
   const [roundDeadlineIso, setRoundDeadlineIso] = useState<string | null>(null);
-  const [roundClockSource, setRoundClockSource] = useState<"shared" | "fallback">("fallback");
+  const [roundClockSource, setRoundClockSource] = useState<RoundClockSource>("fallback");
   const [roundStatus, setRoundStatus] = useState<"open" | "closed">("open");
   const [lockedTeamsCount, setLockedTeamsCount] = useState(0);
   const [totalTeamsCount, setTotalTeamsCount] = useState(0);
@@ -558,6 +611,11 @@ export default function RoundDecisionPage() {
   const [teamKpiTarget, setTeamKpiTarget] = useState<KpiTarget | null>(null);
   const [draftKpiTarget, setDraftKpiTarget] = useState<KpiTarget | null>(null);
   const [savingKpiTarget, setSavingKpiTarget] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [stepDurationsMs, setStepDurationsMs] = useState<Record<StepIndex, number>>(createInitialStepDurations);
+
+  const stepStartRef = useRef<number>(Date.now());
+  const activeStepRef = useRef<StepIndex>(0);
 
   const roundEvents = useMemo(() => getRoundConstructionEvents(sessionId, roundNumber), [sessionId, roundNumber]);
   const [resolvedRoundEvents, setResolvedRoundEvents] = useState<ConstructionEvent[]>(roundEvents);
@@ -640,8 +698,61 @@ export default function RoundDecisionPage() {
   );
 
   function update<K extends keyof ExtendedDecisionForm>(key: K, value: ExtendedDecisionForm[K]) {
+    setHasUnsavedChanges(true);
     setForm((prev) => ({ ...prev, [key]: value }));
   }
+
+  function buildStepTimingSnapshot(nowMs = Date.now()) {
+    const snapshot = { ...stepDurationsMs } as Record<StepIndex, number>;
+    const currentStep = activeStepRef.current;
+    snapshot[currentStep] = snapshot[currentStep] + Math.max(0, nowMs - stepStartRef.current);
+    return snapshot;
+  }
+
+  async function trackTelemetry(eventName: string, eventPayload: Record<string, unknown>) {
+    if (!userId || !teamId) return;
+
+    const { error: telemetryErr } = await supabase.from("telemetry_events").insert({
+      user_id: userId,
+      session_id: sessionId,
+      team_id: teamId,
+      round_number: roundNumber,
+      event_name: eventName,
+      event_payload: eventPayload,
+      client_ts: new Date().toISOString(),
+    });
+
+    if (telemetryErr && !isMissingTableError(telemetryErr.message)) {
+      console.warn("telemetry insert failed", telemetryErr.message);
+    }
+  }
+
+  useEffect(() => {
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!hasUnsavedChanges || locked || roundStatus !== "open") return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [hasUnsavedChanges, locked, roundStatus]);
+
+  useEffect(() => {
+    const now = Date.now();
+    const previousStep = activeStepRef.current;
+    const elapsedMs = Math.max(0, now - stepStartRef.current);
+
+    if (elapsedMs > 0) {
+      setStepDurationsMs((prev) => ({
+        ...prev,
+        [previousStep]: prev[previousStep] + elapsedMs,
+      }));
+    }
+
+    activeStepRef.current = activeStep;
+    stepStartRef.current = now;
+  }, [activeStep]);
 
 
   async function ensureTeamKpiTarget(requireForRoundOne: boolean): Promise<KpiTarget | null> {
@@ -706,7 +817,48 @@ export default function RoundDecisionPage() {
     return true;
   };
 
-  
+  const liveStepDurationsMs = useMemo(() => {
+    const snapshot = { ...stepDurationsMs } as Record<StepIndex, number>;
+
+    if (!locked) {
+      const currentStep = activeStepRef.current;
+      snapshot[currentStep] = snapshot[currentStep] + Math.max(0, clockNow - stepStartRef.current);
+    }
+
+    return snapshot;
+  }, [clockNow, locked, stepDurationsMs]);
+
+  const submissionPressure = useMemo(() => {
+    const nowIso = new Date(clockNow).toISOString();
+    const lateNow = computeLatePenalty(roundDeadlineIso, nowIso, roundClockSource);
+    const projectedPointsAfterPenalty = Math.max(0, previewResult.points_earned - lateNow.pointsPenalty);
+
+    const toneClass =
+      lateNow.pointsPenalty > 0
+        ? "border-rose-200 bg-rose-50 text-rose-800"
+        : msLeft !== null && msLeft < 8 * 60_000
+          ? "border-amber-200 bg-amber-50 text-amber-800"
+          : "border-emerald-200 bg-emerald-50 text-emerald-800";
+
+    const message =
+      lateNow.pointsPenalty > 0
+        ? "Extension mode: currently " + lateNow.minutesLate + " min late, estimated -" + lateNow.pointsPenalty + " points if locked now."
+        : msLeft === null
+          ? "Clock syncing..."
+          : lockWindowExpired
+            ? "Window elapsed. Lock is still possible, but timeliness penalties may apply on shared rounds."
+            : "Within lock window. No timeliness penalty if locked now.";
+
+    return {
+      lateNow,
+      projectedPointsAfterPenalty,
+      toneClass,
+      message,
+    };
+  }, [clockNow, lockWindowExpired, msLeft, previewResult.points_earned, roundClockSource, roundDeadlineIso]);
+
+  const currentStepMinutes = (liveStepDurationsMs[activeStep] / 60000).toFixed(1);
+
   useEffect(() => {
     const intervalId = window.setInterval(() => {
       setClockNow(Date.now());
@@ -833,6 +985,11 @@ export default function RoundDecisionPage() {
     (async () => {
       setError("");
       setLoading(true);
+      setHasUnsavedChanges(false);
+      setStepDurationsMs(createInitialStepDurations());
+      activeStepRef.current = 0;
+      stepStartRef.current = Date.now();
+      setActiveStep(0);
 
       const { data: userData } = await supabase.auth.getUser();
       const user = userData.user;
@@ -920,26 +1077,38 @@ export default function RoundDecisionPage() {
       }
 
       const existing = existingData as ExistingDecisionRow | null;
-      if (existing) {
-        const parsedProfile = parseDecisionProfile(existing.raw);
-
-        setForm({
-          ...defaultForm,
-          ...parsedProfile,
-          focus_cost: existing.focus_cost,
-          focus_quality: existing.focus_quality,
-          focus_stakeholder: existing.focus_stakeholder,
-          focus_speed: existing.focus_speed,
-          risk_appetite: existing.risk_appetite,
-          governance_intensity: existing.governance_intensity,
-          buffer_percent: existing.buffer_percent,
-          vendor_strategy: existing.vendor_strategy,
-        });
-
-        setLocked(Boolean(existing.locked));
-      }
-
-      setLoading(false);
+            if (existing) {
+              const parsedProfile = parseDecisionProfile(existing.raw);
+      
+              setForm({
+                ...defaultForm,
+                ...parsedProfile,
+                focus_cost: existing.focus_cost,
+                focus_quality: existing.focus_quality,
+                focus_stakeholder: existing.focus_stakeholder,
+                focus_speed: existing.focus_speed,
+                risk_appetite: existing.risk_appetite,
+                governance_intensity: existing.governance_intensity,
+                buffer_percent: existing.buffer_percent,
+                vendor_strategy: existing.vendor_strategy,
+              });
+      
+              const savedStepRaw = (existing.raw as { active_step?: unknown } | null)?.active_step;
+              const savedStep =
+                typeof savedStepRaw === "number" && savedStepRaw >= 0 && savedStepRaw <= 4
+                  ? (savedStepRaw as StepIndex)
+                  : 0;
+      
+              setActiveStep(savedStep);
+              activeStepRef.current = savedStep;
+              stepStartRef.current = Date.now();
+              setLocked(Boolean(existing.locked));
+            } else {
+              setLocked(false);
+            }
+      
+            setHasUnsavedChanges(false);
+            setLoading(false);
     })();
   }, [roundNumber, router, sessionId, supabase]);
 
@@ -975,6 +1144,20 @@ export default function RoundDecisionPage() {
       );
 
       if (upErr) throw upErr;
+
+      const timingSnapshot = buildStepTimingSnapshot();
+      setStepDurationsMs(timingSnapshot);
+      setHasUnsavedChanges(false);
+
+      void trackTelemetry("decision_draft_saved", {
+        active_step: activeStep,
+        readiness_score: readinessScore,
+        focus_sum: focusSum,
+        ms_left: msLeft,
+        round_clock_source: roundClockSource,
+        lock_window_expired: lockWindowExpired,
+        step_durations_ms: timingSnapshot,
+      });
     } catch (unknownError: unknown) {
       setError(toErrorMessage(unknownError, "Failed to save draft"));
     } finally {
@@ -995,6 +1178,20 @@ export default function RoundDecisionPage() {
       const core = buildCoreDecision(form);
       const currentProfile = extractProfile(form);
       const submittedAt = new Date().toISOString();
+      const latePenaltyPreview = computeLatePenalty(roundDeadlineIso, submittedAt, roundClockSource);
+
+      if (
+        (latePenaltyPreview.pointsPenalty > 0 || readinessScore < 60) &&
+        !window.confirm(
+          "You are about to lock with " +
+            (latePenaltyPreview.pointsPenalty > 0 ? "timeliness penalty and " : "") +
+            (readinessScore < 60 ? "low readiness score." : "") +
+            " Continue?"
+        )
+      ) {
+        setLocking(false);
+        return;
+      }
 
       const { error: lockErr } = await supabase.from("decisions").upsert(
         {
@@ -1062,25 +1259,42 @@ export default function RoundDecisionPage() {
       const kpiEval = evaluateKpiAchievement(effectiveKpiTarget, result);
       const boostedPoints = applyKpiMultiplier(result.points_earned, kpiEval.achieved);
 
-      const augmentedResult: RoundResult = {
-        ...result,
-        points_earned: boostedPoints,
-        detail: {
-          ...result.detail,
-          events: resolvedRoundEvents,
-          kpi: {
-            target: effectiveKpiTarget,
-            achieved: kpiEval.achieved,
-            metric: kpiEval.metricKey,
-            actual: kpiEval.actual,
-            threshold: kpiEval.threshold,
-            threshold_label: kpiEval.thresholdLabel,
-            base_points: result.points_earned,
-            multiplied_points: boostedPoints,
-            multiplier: kpiEval.achieved ? 4 : 1,
-          },
-        },
-      };
+      const latePenalty = computeLatePenalty(roundDeadlineIso, submittedAt, roundClockSource);
+            const finalPoints = Math.max(0, boostedPoints - latePenalty.pointsPenalty);
+            const finalStakeholder = clamp(result.stakeholder_score - latePenalty.stakeholderPenalty, 0, 100);
+      
+            const augmentedResult: RoundResult = {
+              ...result,
+              stakeholder_score: finalStakeholder,
+              points_earned: finalPoints,
+              penalties: (result.penalties ?? 0) + latePenalty.pointsPenalty,
+              detail: {
+                ...result.detail,
+                events: resolvedRoundEvents,
+                kpi: {
+                  target: effectiveKpiTarget,
+                  achieved: kpiEval.achieved,
+                  metric: kpiEval.metricKey,
+                  actual: kpiEval.actual,
+                  threshold: kpiEval.threshold,
+                  threshold_label: kpiEval.thresholdLabel,
+                  base_points: result.points_earned,
+                  multiplied_points: boostedPoints,
+                  late_points_penalty: latePenalty.pointsPenalty,
+                  final_points: finalPoints,
+                  multiplier: kpiEval.achieved ? 4 : 1,
+                },
+                timeliness: {
+                  clock_source: roundClockSource,
+                  deadline_at: roundDeadlineIso,
+                  submitted_at: submittedAt,
+                  minutes_late: latePenalty.minutesLate,
+                  points_penalty: latePenalty.pointsPenalty,
+                  stakeholder_penalty: latePenalty.stakeholderPenalty,
+                  extension_mode: latePenalty.extensionMode,
+                },
+              },
+            };
 
       const { error: resultErr } = await supabase.from("team_results").upsert(
         {
@@ -1179,6 +1393,21 @@ export default function RoundDecisionPage() {
           .update({ current_round: updatedRound, status })
           .eq("id", sessionId);
       }
+      const finalTimingSnapshot = buildStepTimingSnapshot();
+      setStepDurationsMs(finalTimingSnapshot);
+      setHasUnsavedChanges(false);
+
+      void trackTelemetry("decision_locked", {
+        active_step: activeStep,
+        readiness_score: readinessScore,
+        focus_sum: focusSum,
+        ms_left: msLeft,
+        round_clock_source: roundClockSource,
+        lock_window_expired: lockWindowExpired,
+        late_minutes: latePenaltyPreview.minutesLate,
+        late_points_penalty: latePenaltyPreview.pointsPenalty,
+        step_durations_ms: finalTimingSnapshot,
+      });
 
       setLocked(true);
       router.push(`/sessions/${sessionId}/round/${roundNumber}/results`);
@@ -1341,6 +1570,9 @@ export default function RoundDecisionPage() {
                   Teams locked: {lockedTeamsCount}/{totalTeamsCount || "-"} | Round status: {roundStatus}
                 </div>
                 <div className="mt-1 text-[11px]">Clock source: {roundClockSource === "shared" ? "session_rounds" : "local fallback"}</div>
+                <div className="mt-1 text-[11px]">{submissionPressure.message}</div>
+                <div className="mt-1 text-[11px]">Projected points if locked now: {submissionPressure.projectedPointsAfterPenalty}</div>
+                <div className="mt-1 text-[11px]">Current step effort: {currentStepMinutes}m | Draft: {hasUnsavedChanges ? "Unsaved" : "Saved"}</div>
               </div>
 
               <Link className="inline-flex text-sm underline text-slate-700" href={`/sessions/${sessionId}`}>
