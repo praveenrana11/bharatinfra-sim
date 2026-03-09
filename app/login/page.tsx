@@ -14,7 +14,8 @@ export default function LoginPage() {
 
     try {
       const supabase = getSupabaseClient();
-      const redirectTo = `${window.location.origin}/auth/callback`;
+      const appUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "");
+      const redirectTo = `${appUrl || window.location.origin}/auth/callback`;
 
       const { error } = await supabase.auth.signInWithOtp({
         email,
