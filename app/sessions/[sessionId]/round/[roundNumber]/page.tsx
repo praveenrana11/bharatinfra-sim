@@ -841,12 +841,12 @@ export default function RoundDecisionPage() {
           : "border-emerald-200 bg-emerald-50 text-emerald-800";
 
     const message =
-      lateNow.pointsPenalty > 0
-        ? "Extension mode: currently " + lateNow.minutesLate + " min late, estimated -" + lateNow.pointsPenalty + " points if locked now."
-        : msLeft === null
-          ? "Clock syncing..."
-          : lockWindowExpired
-            ? "Window elapsed. Lock is still possible, but timeliness penalties may apply on shared rounds."
+      roundClockSource === "shared" && lockWindowExpired
+        ? "Deadline reached. Team lock is disabled. Facilitator will auto-lock pending teams."
+        : lateNow.pointsPenalty > 0
+          ? "Currently " + lateNow.minutesLate + " min late, estimated -" + lateNow.pointsPenalty + " points if locked now."
+          : msLeft === null
+            ? "Clock syncing..."
             : "Within lock window. No timeliness penalty if locked now.";
 
     return {
@@ -1171,6 +1171,9 @@ export default function RoundDecisionPage() {
 
     try {
       if (!teamId) throw new Error("Team not loaded yet.");
+      if (roundClockSource === "shared" && lockWindowExpired) {
+        throw new Error("Round deadline has passed. Wait for facilitator to close and auto-lock.");
+      }
       if (focusSum !== 100) throw new Error(`Focus must total 100 (current: ${focusSum}).`);
 
       const effectiveKpiTarget = await ensureTeamKpiTarget(true);
@@ -1434,7 +1437,8 @@ export default function RoundDecisionPage() {
   const riskLevel =
     readinessScore >= 80 ? "Controlled" : readinessScore >= 60 ? "Watchlist" : "High Risk";
 
-  const formReadOnly = locked || roundStatus !== "open";
+  const lockBlockedByDeadline = roundClockSource === "shared" && lockWindowExpired;
+  const formReadOnly = locked || roundStatus !== "open" || lockBlockedByDeadline;
   const fyLabel = `FY ${roundNumber}`;
   const selectedSectorMeta = sectorVisuals[form.primary_sector];
   const subcontractShare = Math.max(0, 100 - form.self_perform_percent);
@@ -1563,7 +1567,7 @@ export default function RoundDecisionPage() {
                     : msLeft === null
                       ? "Initializing..."
                       : lockWindowExpired
-                        ? "Window elapsed. You can still submit in extension mode."
+                        ? "Deadline reached. Waiting for facilitator auto-lock."
                         : `Time left: ${formatClock(msLeft)}`}
                 </div>
                 <div className="mt-1 text-[11px]">
@@ -2294,7 +2298,7 @@ export default function RoundDecisionPage() {
                       {saving ? "Saving..." : "Save Draft"}
                     </Button>
                     <Button onClick={lockAndGenerateResults} disabled={locking || saving || savingKpiTarget || formReadOnly || !stepValidations[4]}>
-                      {locking ? "Locking..." : roundStatus === "closed" ? "Round Closed" : lockWindowExpired ? "Lock and Generate Results (Extension)" : "Lock and Generate Results"}
+                      {locking ? "Locking..." : roundStatus === "closed" ? "Round Closed" : lockBlockedByDeadline ? "Lock Window Closed" : "Lock and Generate Results"}
                     </Button>
                     {locked ? (
                       <Link
@@ -2314,75 +2318,3 @@ export default function RoundDecisionPage() {
     </RequireAuth>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
