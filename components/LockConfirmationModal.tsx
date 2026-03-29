@@ -46,14 +46,14 @@ export default function LockConfirmationModal({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-950/80 px-0 py-0 backdrop-blur-sm sm:items-center sm:px-4 sm:py-6">
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="lock-confirmation-title"
-        className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_35px_120px_rgba(15,23,42,0.45)]"
+        className="flex h-full w-full flex-col overflow-hidden rounded-none border-0 bg-white shadow-[0_35px_120px_rgba(15,23,42,0.45)] sm:h-auto sm:max-h-[90vh] sm:max-w-5xl sm:rounded-[28px] sm:border sm:border-slate-200"
       >
-        <div className="flex items-start justify-between border-b border-slate-200 px-6 py-5">
+        <div className="flex items-start justify-between border-b border-slate-200 px-4 py-4 sm:px-6 sm:py-5">
           <div>
             <div className="text-xs font-bold uppercase tracking-[0.24em] text-slate-500">
               Final Lock Check
@@ -78,13 +78,13 @@ export default function LockConfirmationModal({
           </button>
         </div>
 
-        <div className="border-b border-rose-200 bg-rose-50 px-6 py-4">
+        <div className="border-b border-rose-200 bg-rose-50 px-4 py-4 sm:px-6">
           <div className="text-sm font-semibold text-rose-800">
             Once locked, decisions cannot be changed for this round.
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-6 py-6">
+        <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
           {warningItems.length > 0 ? (
             <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4">
               <div className="text-xs font-bold uppercase tracking-[0.2em] text-amber-700">
@@ -126,7 +126,7 @@ export default function LockConfirmationModal({
           </div>
         </div>
 
-        <div className="flex flex-col gap-3 border-t border-slate-200 bg-slate-50 px-6 py-5 md:flex-row md:items-center md:justify-between">
+        <div className="flex flex-col gap-3 border-t border-slate-200 bg-slate-50 px-4 py-4 sm:px-6 sm:py-5 md:flex-row md:items-center md:justify-between">
           <Button
             type="button"
             variant="secondary"

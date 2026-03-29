@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
@@ -12,6 +12,11 @@ import RoundStepper, { RoundNode, RoundState } from "@/components/RoundStepper";
 import { computeRoundResultV2, DecisionDraft, RoundResult } from "@/lib/simEngine";
 import { parseDecisionProfile, DEFAULT_DECISION_PROFILE, DecisionProfile } from "@/lib/decisionProfile";
 import { parseKpiTarget, evaluateKpiAchievement, applyKpiMultiplier } from "@/lib/kpi";
+import {
+  BHARATINFRA_ONBOARDING_STORAGE_KEY,
+  HOW_TO_PLAY_SEEN_EVENT,
+  openHowToPlay,
+} from "@/lib/howToPlay";
 
 type RouteParams = { sessionId?: string };
 type MembershipRow = { team_id: string };
@@ -216,8 +221,10 @@ export default function SessionPage() {
 
   const [lockedTeams, setLockedTeams] = useState(0);
   const [teamCount, setTeamCount] = useState(0);
+  const [showHowToPlayButton, setShowHowToPlayButton] = useState(false);
 
   const [clockNow, setClockNow] = useState(0);
+  const onboardingCheckRef = useRef(false);
 
   useEffect(() => {
     const id = window.setInterval(() => setClockNow(Date.now()), 1000);
@@ -402,6 +409,29 @@ export default function SessionPage() {
       window.clearInterval(intervalId);
     };
   }, [loading, nextRound, sessionId, supabase]);
+
+  useEffect(() => {
+    const handleSeen = () => setShowHowToPlayButton(true);
+
+    window.addEventListener(HOW_TO_PLAY_SEEN_EVENT, handleSeen);
+    return () => window.removeEventListener(HOW_TO_PLAY_SEEN_EVENT, handleSeen);
+  }, []);
+
+  useEffect(() => {
+    if (loading || error || onboardingCheckRef.current) return;
+
+    onboardingCheckRef.current = true;
+
+    const hasSeenOnboarding = localStorage.getItem(BHARATINFRA_ONBOARDING_STORAGE_KEY) === "true";
+
+    if (hasSeenOnboarding) {
+      setShowHowToPlayButton(true);
+      return;
+    }
+
+    const openTimer = window.setTimeout(() => openHowToPlay(0), 0);
+    return () => window.clearTimeout(openTimer);
+  }, [error, loading]);
 
   const isComplete = roundCount > 0 && completedRound >= roundCount;
   const msLeft = roundDeadlineIso && clockNow ? Date.parse(roundDeadlineIso) - clockNow : null;
@@ -881,9 +911,20 @@ async function autoCloseRoundWithAutolock(closeIso: string): Promise<AutoCloseSu
               <h1 className="text-3xl font-black tracking-tight text-white uppercase">Mission Control</h1>
               <p className="mt-1 text-sm text-blue-400/80 uppercase tracking-widest font-semibold">{sessionName || "Loading..."} // CODE: {code}</p>
             </div>
-            <Link className="text-sm font-bold text-slate-400 hover:text-white" href="/dashboard">
-              [ RETURN TO ARENA ]
-            </Link>
+            <div className="flex items-center gap-3">
+              {showHowToPlayButton ? (
+                <Button
+                  variant="secondary"
+                  onClick={() => openHowToPlay(0)}
+                  className="rounded-full border-teal-400/25 bg-teal-500/10 px-4 py-2 text-[11px] text-teal-100 hover:border-teal-300/40 hover:bg-teal-500/20"
+                >
+                  How to Play
+                </Button>
+              ) : null}
+              <Link className="text-sm font-bold text-slate-400 hover:text-white" href="/dashboard">
+                [ RETURN TO ARENA ]
+              </Link>
+            </div>
           </div>
 
           {error ? (

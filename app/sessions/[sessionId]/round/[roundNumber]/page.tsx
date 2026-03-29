@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
@@ -46,7 +46,7 @@ import {
   BudgetBreakdown,
 } from "@/lib/decisionProfile";
 import { ConstructionEvent, getRoundConstructionEvents } from "@/lib/constructionNews";
-import { KPI_TARGET_OPTIONS, KpiTarget, parseKpiTarget, evaluateKpiAchievement } from "@/lib/kpi";
+import { KPI_TARGET_OPTIONS, KpiTarget, parseKpiTarget } from "@/lib/kpi";
 import { getNewsImageUrl } from "@/lib/newsVisuals";
 import { parseConstructionEvents } from "@/lib/newsPayload";
 import { getRoundEvents, GameEvent } from "@/lib/eventDeck";
@@ -178,14 +178,6 @@ type LatePenaltyResult = {
   pointsPenalty: number;
   stakeholderPenalty: number;
   extensionMode: boolean;
-};
-
-type EngagementMission = {
-  id: string;
-  title: string;
-  target: string;
-  impact: string;
-  done: boolean;
 };
 
 type TooltipCopy = {
@@ -368,96 +360,6 @@ const defaultForm: ExtendedDecisionForm = {
   vendor_strategy: "Balanced",
   ...DEFAULT_DECISION_PROFILE,
 };
-
-
-const externalContextVisuals: Record<ExternalContext, { emoji: string; visualClass: string }> = {
-  "Stable Environment": {
-    emoji: "SK",
-    visualClass: "bg-gradient-to-br from-cyan-500 via-sky-500 to-blue-700",
-  },
-  "Material Price Spike": {
-    emoji: "MC",
-    visualClass: "bg-gradient-to-br from-amber-500 via-orange-500 to-rose-600",
-  },
-  "Labor Tightness": {
-    emoji: "LF",
-    visualClass: "bg-gradient-to-br from-fuchsia-500 via-pink-500 to-rose-500",
-  },
-  "Permitting Delay": {
-    emoji: "RG",
-    visualClass: "bg-gradient-to-br from-slate-500 via-slate-600 to-zinc-700",
-  },
-};
-
-const postureVisuals: Record<StrategicPosture, { emoji: string; visualClass: string }> = {
-  "Balanced Portfolio": {
-    emoji: "BL",
-    visualClass: "bg-gradient-to-br from-teal-500 via-emerald-500 to-green-700",
-  },
-  "Cost Leadership": {
-    emoji: "CT",
-    visualClass: "bg-gradient-to-br from-indigo-500 via-blue-500 to-cyan-700",
-  },
-  "Quality Leadership": {
-    emoji: "QL",
-    visualClass: "bg-gradient-to-br from-violet-500 via-purple-500 to-indigo-700",
-  },
-  "Stakeholder Trust": {
-    emoji: "TR",
-    visualClass: "bg-gradient-to-br from-rose-500 via-red-500 to-orange-700",
-  },
-};
-type SectorVisualMeta = {
-  image: string;
-  headline: string;
-  challenge: string;
-  quality_expectation: string;
-};
-
-const sectorVisuals: Record<ConstructionSector, SectorVisualMeta> = {
-  "Roads & Highways": {
-    image: "https://images.pexels.com/photos/280221/pexels-photo-280221.jpeg?auto=compress&cs=tinysrgb&w=1200",
-    headline: "High volume corridor EPC",
-    challenge: "Monsoon drainage, bitumen volatility, and traffic-diversion sequencing drive yearly variance.",
-    quality_expectation: "Pavement quality and turnaround speed are heavily audited.",
-  },
-  "Transmission & Power": {
-    image: "https://images.pexels.com/photos/414837/pexels-photo-414837.jpeg?auto=compress&cs=tinysrgb&w=1200",
-    headline: "Grid reliability and corridor access",
-    challenge: "ROW clearances and safety protocols create schedule and stakeholder pressure.",
-    quality_expectation: "Reliability and incident-free delivery matter more than pure speed.",
-  },
-  "Bridges & Flyovers": {
-    image: "https://images.pexels.com/photos/258117/pexels-photo-258117.jpeg?auto=compress&cs=tinysrgb&w=1200",
-    headline: "Complex staging in dense corridors",
-    challenge: "Temporary works, traffic management, and quality control of structural packages are key.",
-    quality_expectation: "Rework penalties are nonlinear due to structural safety scrutiny.",
-  },
-  "Airports & Metro": {
-    image: "https://images.pexels.com/photos/1105766/pexels-photo-1105766.jpeg?auto=compress&cs=tinysrgb&w=1200",
-    headline: "Interface-heavy urban mega projects",
-    challenge: "Multi-agency approvals and handover integration often drive delay risk.",
-    quality_expectation: "High QA, documentation discipline, and stakeholder trust are non-negotiable.",
-  },
-  "Dams & Irrigation": {
-    image: "https://images.pexels.com/photos/1227513/pexels-photo-1227513.jpeg?auto=compress&cs=tinysrgb&w=1200",
-    headline: "Heavy civil under hydrology uncertainty",
-    challenge: "Flood windows and geotechnical risk require strong resilience and contingency budgets.",
-    quality_expectation: "Concrete quality and safety controls dominate scoring outcomes.",
-  },
-  "Residential & Real Estate": {
-    image: "https://images.pexels.com/photos/323780/pexels-photo-323780.jpeg?auto=compress&cs=tinysrgb&w=1200",
-    headline: "Cash-cycle sensitive delivery",
-    challenge: "Demand cycles and compliance disclosures directly impact cash and stakeholder scores.",
-    quality_expectation: "Timely handover plus transparent communication sustain trust.",
-  },
-  "Heavy Civil & Industrial": {
-    image: "https://images.pexels.com/photos/256381/pexels-photo-256381.jpeg?auto=compress&cs=tinysrgb&w=1200",
-    headline: "Specialized equipment-led execution",
-    challenge: "Asset utilization, specialist subcontracting, and safety governance drive competitiveness.",
-    quality_expectation: "Capability fit and execution depth are rewarded over aggressive bidding.",
-  },
-};
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
@@ -626,6 +528,44 @@ function FieldLabel({ label, tooltip }: { label: string; tooltip?: TooltipCopy }
       <span>{label}</span>
       {tooltip ? <Tooltip title={tooltip.title} lines={tooltip.lines} /> : null}
     </span>
+  );
+}
+
+function SidebarAccordion({
+  title,
+  summary,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string;
+  summary: string;
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/5 bg-slate-900/60">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center justify-between gap-3 px-4 py-4 text-left"
+      >
+        <div className="min-w-0">
+          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{title}</div>
+          <div className="mt-1 text-xs font-medium text-slate-300">{summary}</div>
+        </div>
+        <svg
+          className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`}
+          viewBox="0 0 20 20"
+          fill="none"
+          stroke="currentColor"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="m5 7 5 5 5-5" />
+        </svg>
+      </button>
+      {open ? <div className="border-t border-white/5 px-4 py-4">{children}</div> : null}
+    </div>
   );
 }
 
@@ -842,6 +782,8 @@ export default function RoundDecisionPage() {
   const [saving, setSaving] = useState(false);
   const [locking, setLocking] = useState(false);
   const [showLockConfirmation, setShowLockConfirmation] = useState(false);
+  const [showBudgetPressure, setShowBudgetPressure] = useState(false);
+  const [showProjectedOutcome, setShowProjectedOutcome] = useState(false);
 
   const [clockNow, setClockNow] = useState(Date.now());
   const [roundDeadlineIso, setRoundDeadlineIso] = useState<string | null>(null);
@@ -1074,17 +1016,6 @@ export default function RoundDecisionPage() {
     return true;
   };
 
-  const liveStepDurationsMs = useMemo(() => {
-    const snapshot = { ...stepDurationsMs } as Record<StepIndex, number>;
-
-    if (!locked) {
-      const currentStep = activeStepRef.current;
-      snapshot[currentStep] = snapshot[currentStep] + Math.max(0, clockNow - stepStartRef.current);
-    }
-
-    return snapshot;
-  }, [clockNow, locked, stepDurationsMs]);
-
   const submissionPressure = useMemo(() => {
     const nowIso = new Date(clockNow).toISOString();
     const lateNow = computeLatePenalty(roundDeadlineIso, nowIso, roundClockSource);
@@ -1114,96 +1045,8 @@ export default function RoundDecisionPage() {
     };
   }, [clockNow, lockWindowExpired, msLeft, previewResult.points_earned, roundClockSource, roundDeadlineIso]);
 
-  const currentStepMinutes = (liveStepDurationsMs[activeStep] / 60000).toFixed(1);
-  const totalStepMinutes = Object.values(liveStepDurationsMs).reduce((sum, value) => sum + value, 0) / 60000;
-  const completedStepCount = (Object.keys(stepValidations) as Array<`${StepIndex}`>).reduce((count, key) => {
-    const stepKey = Number(key) as StepIndex;
-    return count + (stepValidations[stepKey] ? 1 : 0);
-  }, 0);
-
-  const kpiPreview = useMemo(() => {
-    const selectedKpi = parseKpiTarget(teamKpiTarget || draftKpiTarget);
-    if (!selectedKpi) return null;
-    return evaluateKpiAchievement(selectedKpi, previewResult);
-  }, [draftKpiTarget, previewResult, teamKpiTarget]);
-
-  const engagementMissions = useMemo<EngagementMission[]>(() => {
-    return [
-      {
-        id: "delivery",
-        title: "Balanced delivery",
-        target: "SPI >= 1.00 and CPI >= 1.00",
-        impact: "Improves schedule-cost consistency and rank stability.",
-        done: previewResult.schedule_index >= 1 && previewResult.cost_index >= 1,
-      },
-      {
-        id: "workforce",
-        title: "Safe workforce tempo",
-        target: "Safety >= 78 and avoid overloaded crews",
-        impact: "Reduces high-penalty risk from execution stress.",
-        done: previewResult.safety_score >= 78 && form.workforce_load_state !== "Overloaded",
-      },
-      {
-        id: "ethics",
-        title: "Ethics shield",
-        target: "No high-risk facilitation and low exposure",
-        impact: "Protects stakeholder trust and legal resilience.",
-        done: form.compliance_posture !== "High-Risk Facilitation" && form.facilitation_budget_index <= 30,
-      },
-      {
-        id: "kpi",
-        title: "KPI strike",
-        target: "Preview should meet your selected KPI target",
-        impact: "Unlocks 4x points multiplier for the round.",
-        done: Boolean(kpiPreview?.achieved),
-      },
-    ];
-  }, [
-    form.compliance_posture,
-    form.facilitation_budget_index,
-    form.workforce_load_state,
-    kpiPreview?.achieved,
-    previewResult.cost_index,
-    previewResult.safety_score,
-    previewResult.schedule_index,
-  ]);
-
-  const missionHits = engagementMissions.filter((mission) => mission.done).length;
-  const progressPct = Math.round((completedStepCount / stepTitles.length) * 100);
-
-  const roundIntensity = useMemo(() => {
-    const score =
-      36 +
-      (form.bid_aggressiveness - 3) * 12 +
-      (form.risk_appetite === "Aggressive" ? 18 : form.risk_appetite === "Conservative" ? -6 : 0) +
-      (form.workforce_load_state === "Overloaded" ? 16 : form.workforce_load_state === "Underloaded" ? -4 : 0) +
-      (form.pm_utilization_target - 75) / 2 +
-      (form.compliance_posture === "High-Risk Facilitation" ? 14 : 0) +
-      (form.market_expansion === "Scale Two New Regions" ? 14 : form.market_expansion === "Pilot One New Region" ? 7 : 0);
-    return Math.round(clamp(score, 0, 100));
-  }, [
-    form.bid_aggressiveness,
-    form.compliance_posture,
-    form.market_expansion,
-    form.pm_utilization_target,
-    form.risk_appetite,
-    form.workforce_load_state,
-  ]);
-
-  const roundIntensityBand = roundIntensity >= 75 ? "High" : roundIntensity >= 50 ? "Moderate" : "Controlled";
-  const roundIntensityTone =
-    roundIntensity >= 75
-      ? "border-rose-200 bg-rose-50 text-rose-800"
-      : roundIntensity >= 50
-        ? "border-amber-200 bg-amber-50 text-amber-800"
-        : "border-emerald-200 bg-emerald-50 text-emerald-800";
-
-  const pacingHint =
-    totalStepMinutes < 12
-      ? "You are moving very fast. Consider deeper review for realism."
-      : totalStepMinutes <= 35
-        ? "Good decision pace for a 30-40 minute simulation round."
-        : "Detailed pace is strong. Prioritize lock readiness before deadline.";
+  const timeRemainingLabel = msLeft === null ? "--:--" : formatClock(msLeft);
+  const activeStepLabel = stepTitles[activeStep];
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -1742,11 +1585,33 @@ export default function RoundDecisionPage() {
 
   const riskLevel =
     readinessScore >= 80 ? "Controlled" : readinessScore >= 60 ? "Watchlist" : "High Risk";
+  const riskLevelTone =
+    riskLevel === "Controlled"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+      : riskLevel === "Watchlist"
+        ? "border-amber-200 bg-amber-50 text-amber-800"
+        : "border-rose-200 bg-rose-50 text-rose-800";
+  const budgetPressureItems = [
+    { label: "People & L&D", value: budget.people_l_and_d },
+    { label: "Engineering quality", value: budget.engineering_quality },
+    { label: "Operations resilience", value: budget.operations_resilience },
+    { label: "Stakeholder visibility", value: budget.stakeholder_visibility },
+    { label: "Risk contingency", value: budget.risk_contingency },
+    { label: "Financing pressure", value: budget.financing_cost_pressure },
+    { label: "Subcontractor mix", value: budget.subcontracting_and_partnering },
+    { label: "Assets & specialization", value: budget.asset_and_specialization },
+    { label: "Compliance & sustainability", value: budget.compliance_and_sustainability },
+  ];
+  const projectedOutcomeItems = [
+    { label: "Est. points", value: `+${Math.round(previewResult.points_earned)}` },
+    { label: "Projected after penalty", value: `+${Math.round(submissionPressure.projectedPointsAfterPenalty)}` },
+    { label: "SPI", value: previewResult.schedule_index.toFixed(2) },
+    { label: "CPI", value: previewResult.cost_index.toFixed(2) },
+    { label: "Quality", value: `${Math.round(previewResult.quality_score)}` },
+    { label: "Safety", value: `${Math.round(previewResult.safety_score)}` },
+  ];
 
   const lockBlockedByDeadline = roundClockSource === "shared" && lockWindowExpired;
-  const formReadOnly = locked || roundStatus !== "open" || lockBlockedByDeadline;
-  const fyLabel = `FY ${roundNumber}`;
-  const selectedSectorMeta = sectorVisuals[form.primary_sector];
   const subcontractShare = Math.max(0, 100 - form.self_perform_percent);
   const latePenaltyPreview = useMemo(
     () => computeLatePenalty(roundDeadlineIso, new Date(clockNow).toISOString(), roundClockSource),
@@ -1871,58 +1736,6 @@ export default function RoundDecisionPage() {
     return items;
   }, [latePenaltyPreview.minutesLate, latePenaltyPreview.pointsPenalty, readinessScore]);
 
-  const makeVsBuySnapshot = useMemo(() => {
-    const inHouseCostIndex = clamp(
-      0.9 +
-        (form.pm_utilization_target - 70) / 220 +
-        (form.workforce_load_state === "Overloaded"
-          ? 0.08
-          : form.workforce_load_state === "Underloaded"
-            ? -0.05
-            : 0),
-      0.75,
-      1.3
-    );
-
-    const subcontractCostIndex = clamp(
-      0.92 +
-        (form.subcontractor_profile === "Tier 1 Proven"
-          ? 0.16
-          : form.subcontractor_profile === "Tier 3 Fast Track"
-            ? -0.08
-            : 0.04) +
-        subcontractShare / 500,
-      0.75,
-      1.35
-    );
-
-    const qualityConfidence =
-      form.subcontractor_profile === "Tier 1 Proven"
-        ? "High"
-        : form.subcontractor_profile === "Tier 2 Value"
-          ? "Moderate"
-          : "Variable";
-
-    const executionRisk =
-      form.workforce_load_state === "Overloaded"
-        ? "Elevated"
-        : form.workforce_load_state === "Underloaded"
-          ? "Capacity under-used"
-          : "Balanced";
-
-    return {
-      inHouseCostIndex,
-      subcontractCostIndex,
-      qualityConfidence,
-      executionRisk,
-    };
-  }, [
-    form.pm_utilization_target,
-    form.workforce_load_state,
-    form.subcontractor_profile,
-    subcontractShare,
-  ]);
-
   const nextStep = () => {
     const candidate = Math.min(activeStep + 1, 4) as StepIndex;
     if (availableStep(candidate)) {
@@ -1939,7 +1752,7 @@ export default function RoundDecisionPage() {
 
   return (
     <RequireAuth>
-      <div className="flex flex-col min-h-[100dvh] pb-32 bg-[#020617] text-slate-300">
+      <div className="flex min-h-[100dvh] flex-col bg-[#020617] pb-40 text-slate-300 md:pb-32">
         <LockConfirmationModal
           open={showLockConfirmation}
           sections={lockSummarySections}
@@ -1976,7 +1789,7 @@ export default function RoundDecisionPage() {
             <div className="flex flex-col items-end">
               <span className="text-slate-500 uppercase tracking-widest text-[9px]">Time Remaining</span>
               <span className={`font-bold text-lg font-mono leading-none ${lockWindowExpired ? "text-rose-400" : "text-emerald-400"}`}>
-                {msLeft === null ? "--:--" : formatClock(msLeft)}
+                {timeRemainingLabel}
               </span>
               <span
                 className={`mt-1 max-w-[260px] text-right text-[10px] font-semibold uppercase tracking-wide ${
@@ -2004,10 +1817,40 @@ export default function RoundDecisionPage() {
           ) : (
              <>
                 <RoundBriefingCard sessionId={sessionId} roundNumber={roundNumber} teamId={teamId} />
-                <div className="grid grid-cols-1 lg:grid-cols-[1fr_minmax(0,340px)] gap-6">
+                <div className="rounded-2xl border border-white/5 bg-slate-950/70 px-4 py-4 md:flex md:items-center md:justify-between md:gap-4 lg:hidden">
+                  <div className="flex items-center gap-2">
+                    {stepTitles.map((title, index) => {
+                      const idx = index as StepIndex;
+                      const current = activeStep === idx;
+                      const complete = idx < activeStep || stepValidations[idx];
+                      return (
+                        <div
+                          key={`tablet-step-${title}`}
+                          className={`h-2.5 w-8 rounded-full transition-all ${
+                            current ? "bg-blue-500" : complete ? "bg-emerald-500/80" : "bg-slate-800"
+                          }`}
+                          aria-hidden="true"
+                        />
+                      );
+                    })}
+                  </div>
+                  <div className="mt-3 flex items-center justify-between gap-4 text-xs md:mt-0">
+                    <div className="rounded-full border border-white/10 bg-white/5 px-3 py-2 font-bold uppercase tracking-[0.18em] text-slate-200">
+                      Ready {readinessScore}%
+                    </div>
+                    <div className="text-right">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Time remaining</div>
+                      <div className={`mt-1 font-mono text-lg font-black ${lockWindowExpired ? "text-rose-400" : "text-emerald-400"}`}>
+                        {timeRemainingLabel}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
                 <div className="space-y-6">
                    {/* TAB BAR */}
-                   <div className="overflow-x-auto pb-2 scrollbar-hide">
+                   <div className="hidden overflow-x-auto pb-2 scrollbar-hide">
                      <div className="flex gap-2 min-w-max">
                        {stepTitles.map((title, index) => {
                          const idx = index as StepIndex;
@@ -2268,30 +2111,195 @@ export default function RoundDecisionPage() {
                         </div>
                      </div>
                    )}
+
+                   <div className="space-y-4 rounded-2xl border border-white/5 bg-slate-950/70 p-4 md:hidden">
+                     <div className="flex items-center justify-between gap-3">
+                       <Button
+                         variant="secondary"
+                         onClick={prevStep}
+                         disabled={activeStep === 0 || isLocked}
+                         className="flex-1 border-slate-700 bg-slate-900 text-slate-200"
+                       >
+                         Previous
+                       </Button>
+                       <div className="flex items-center gap-1">
+                         {stepTitles.map((title, index) => {
+                           const idx = index as StepIndex;
+                           return (
+                             <div
+                               key={`mobile-progress-${title}`}
+                               className={`h-2 w-6 rounded-full ${
+                                 activeStep === idx ? "bg-blue-500" : activeStep > idx ? "bg-emerald-500/70" : "bg-slate-800"
+                               }`}
+                             />
+                           );
+                         })}
+                       </div>
+                       <Button
+                         onClick={nextStep}
+                         disabled={activeStep === 4 || !stepValidations[activeStep] || isLocked}
+                         className="flex-1"
+                       >
+                         Next
+                       </Button>
+                     </div>
+
+                     {isLocked ? (
+                       <Link href={`/sessions/${sessionId}/round/${roundNumber}/results`} className="block">
+                         <Button className="w-full bg-emerald-600 text-white shadow-emerald-500/20 border-emerald-500">
+                           View Impact Report
+                         </Button>
+                       </Link>
+                     ) : (
+                       <div className="grid grid-cols-1 gap-3">
+                         <Button
+                           variant="secondary"
+                           onClick={saveDraft}
+                           disabled={saving || isLocked}
+                           className="w-full border-slate-700 bg-slate-900 text-slate-200"
+                         >
+                           {saving ? "Saving..." : "Save Draft"}
+                         </Button>
+                         <Button
+                           onClick={openLockConfirmation}
+                           disabled={locking || saving || isLocked || !stepValidations[4]}
+                           className="w-full"
+                         >
+                           {locking ? "Initializing..." : lockBlockedByDeadline ? "Window Closed" : "Lock and Generate Results"}
+                         </Button>
+                         <div className="text-center text-[10px] font-bold uppercase tracking-[0.22em]">
+                           {hasUnsavedChanges ? (
+                             <span className="text-amber-400">Unsaved Draft</span>
+                           ) : (
+                             <span className="text-emerald-500">Input Accepted</span>
+                           )}
+                         </div>
+                       </div>
+                     )}
+                   </div>
                 </div>
 
                 {/* SIDEBAR ZONE */}
-                <div className="w-full shrink-0 flex flex-col gap-6 lg:sticky lg:top-28">
-                  <div className="p-5 rounded-2xl bg-slate-900/60 border border-white/5">
-                    <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-4">Readiness Protocol</div>
-                    <div className="space-y-2">
-                       {readinessChecks.map((check) => (
-                         <div key={check.label} className="text-xs flex items-center justify-between gap-2">
-                           <span className={check.pass ? "text-slate-300" : "text-amber-500 font-semibold"}>{check.label}</span>
-                           <span className={`w-2 h-2 rounded-full flex-shrink-0 ${check.pass ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" : "bg-rose-500"}`}></span>
-                         </div>
-                       ))}
+                <aside className="hidden w-full shrink-0 flex-col gap-4 lg:sticky lg:top-28 lg:flex">
+                  <div className="rounded-2xl border border-white/5 bg-slate-900/60 p-4">
+                    <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Step Navigation</div>
+                    <div className="mt-4 space-y-2">
+                      {stepTitles.map((title, index) => {
+                        const idx = index as StepIndex;
+                        const current = activeStep === idx;
+                        const unlocked = availableStep(idx);
+                        return (
+                          <button
+                            key={`sidebar-step-${title}`}
+                            type="button"
+                            onClick={() => setActiveStep(idx)}
+                            disabled={!unlocked}
+                            className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-3 text-left transition ${
+                              current
+                                ? "border-blue-500/40 bg-blue-500/15 text-white"
+                                : "border-white/5 bg-slate-950/70 text-slate-300 hover:border-white/10 hover:bg-slate-900"
+                            } ${!unlocked ? "cursor-not-allowed opacity-40" : ""}`}
+                          >
+                            <div className="min-w-0">
+                              <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">
+                                Step {index + 1}
+                              </div>
+                              <div className="mt-1 truncate text-sm font-semibold">{title}</div>
+                            </div>
+                            <span
+                              className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                                current ? "bg-blue-400" : stepValidations[idx] ? "bg-emerald-400" : "bg-slate-700"
+                              }`}
+                            />
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
-                </div>
+
+                  <div className="rounded-2xl border border-white/5 bg-slate-900/60 p-4">
+                    <div className="space-y-3 text-xs">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-bold uppercase tracking-[0.18em] text-slate-500">Readiness</span>
+                        <span className="font-semibold text-slate-200">{readinessScore}%</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-bold uppercase tracking-[0.18em] text-slate-500">Risk band</span>
+                        <span className={`rounded-full border px-2 py-1 font-semibold ${riskLevelTone}`}>
+                          {riskLevel}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="mt-4 rounded-2xl border border-white/5 bg-slate-950/80 px-4 py-4">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Time remaining</div>
+                      <div className={`mt-2 font-mono text-3xl font-black ${lockWindowExpired ? "text-rose-400" : "text-emerald-400"}`}>
+                        {timeRemainingLabel}
+                      </div>
+                      <div className="mt-2 text-[11px] text-slate-400">{submissionPressure.message}</div>
+                    </div>
+                  </div>
+
+                  <SidebarAccordion
+                    title="Budget Pressure"
+                    summary={`Estimated total Rs ${Math.round(budget.total_budget_pressure / 1000)}k`}
+                    open={showBudgetPressure}
+                    onToggle={() => setShowBudgetPressure((current) => !current)}
+                  >
+                    <div className="space-y-3">
+                      {budgetPressureItems.map((item) => (
+                        <BudgetBar key={item.label} label={item.label} value={item.value} max={biggestBudget} />
+                      ))}
+                    </div>
+                  </SidebarAccordion>
+
+                  <SidebarAccordion
+                    title="Projected Outcome"
+                    summary={`Est. Points: ${Math.round(previewResult.points_earned)} | Risk: ${riskLevel}`}
+                    open={showProjectedOutcome}
+                    onToggle={() => setShowProjectedOutcome((current) => !current)}
+                  >
+                    <div className="space-y-3">
+                      {projectedOutcomeItems.map((item) => (
+                        <div
+                          key={item.label}
+                          className="flex items-center justify-between gap-3 rounded-xl border border-white/5 bg-slate-950/70 px-3 py-3 text-xs"
+                        >
+                          <span className="font-bold uppercase tracking-[0.18em] text-slate-500">{item.label}</span>
+                          <span className="font-semibold text-slate-200">{item.value}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </SidebarAccordion>
+                </aside>
              </div>
              </>
           )}
         </main>
 
+        {!loading ? (
+          <div className="fixed inset-x-4 bottom-4 z-50 rounded-2xl border border-white/10 bg-slate-950/95 px-4 py-3 shadow-[0_18px_45px_rgba(2,6,23,0.55)] backdrop-blur-xl md:hidden">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Current step</div>
+                <div className="mt-1 truncate text-sm font-semibold text-white">{activeStepLabel}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Ready</div>
+                <div className="mt-1 text-sm font-black text-slate-100">{readinessScore}%</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Time</div>
+                <div className={`mt-1 font-mono text-sm font-black ${lockWindowExpired ? "text-rose-400" : "text-emerald-400"}`}>
+                  {timeRemainingLabel}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         {/* FOOTER CTA ZONE (Sticky) */}
         {!loading && (
-          <footer className="fixed bottom-0 left-0 right-0 z-50 bg-[#020617]/90 backdrop-blur-xl border-t border-white/10 p-4 shadow-[0_-20px_40px_rgba(0,0,0,0.5)]">
+          <footer className="fixed bottom-0 left-0 right-0 z-50 hidden border-t border-white/10 bg-[#020617]/90 p-4 shadow-[0_-20px_40px_rgba(0,0,0,0.5)] backdrop-blur-xl md:block">
             <div className="max-w-[1180px] mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div className="flex items-center justify-between md:justify-start w-full md:w-auto gap-4">
                 <Button variant="ghost" onClick={prevStep} disabled={activeStep === 0 || isLocked} className="text-slate-400 hover:text-white">

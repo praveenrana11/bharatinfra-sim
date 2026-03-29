@@ -2194,7 +2194,7 @@ export default function SessionFinancialReportPage() {
 
             <Card>
               <CardHeader title="Cumulative Performance" subtitle="Aggregate financial and execution indicators" />
-              <CardBody className="grid grid-cols-2 gap-3 text-sm md:grid-cols-5">
+              <CardBody className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-5">
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="text-slate-500">Total points</div>
                   <div className="mt-1 text-lg font-semibold text-slate-900">{summary.totalPoints}</div>
@@ -2231,7 +2231,7 @@ export default function SessionFinancialReportPage() {
                   <div className="text-sm text-slate-600">KPI multiplier insights will appear once at least one FY result is available.</div>
                 ) : (
                   <>
-                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-5">
+                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-5">
                       <div className="rounded-xl border border-slate-200 bg-white p-3">
                         <div className="text-slate-500">KPI hit years</div>
                         <div className="mt-1 text-lg font-semibold text-slate-900">
@@ -2262,7 +2262,7 @@ export default function SessionFinancialReportPage() {
                       </div>
                     </div>
 
-                    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white p-3">
+                    <div className="mobile-scroll-x rounded-xl border border-slate-200 bg-white p-3">
                       <svg
                         viewBox={`0 0 ${kpiForensicsModel.width} ${kpiForensicsModel.height}`}
                         className="min-w-[720px] w-full"
@@ -2383,7 +2383,7 @@ export default function SessionFinancialReportPage() {
                   </div>
                 ) : (
                   <>
-                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-4">
+                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
                       <div className="rounded-xl border border-slate-200 bg-white p-3">
                         <div className="text-slate-500">Your rank</div>
                         <div className="mt-1 text-lg font-semibold text-slate-900">
@@ -2404,7 +2404,7 @@ export default function SessionFinancialReportPage() {
                       </div>
                     </div>
 
-                    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white p-3">
+                    <div className="mobile-scroll-x rounded-xl border border-slate-200 bg-white p-3">
                       <svg viewBox={`0 0 ${benchmarkModel.width} ${benchmarkModel.height}`} className="min-w-[720px] w-full" role="img" aria-label="Session cumulative points trend chart">
                         <rect x="0" y="0" width={benchmarkModel.width} height={benchmarkModel.height} fill="white" />
 
@@ -2501,7 +2501,7 @@ export default function SessionFinancialReportPage() {
                   <div className="text-sm text-slate-600">Risk debt trend will appear once round results are available.</div>
                 ) : (
                   <>
-                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-4">
+                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
                       <div className="rounded-xl border border-slate-200 bg-white p-3">
                         <div className="text-slate-500">Latest debt total</div>
                         <div className="mt-1 text-lg font-semibold text-slate-900">{riskDebtModel.latest.risk_debt_total.toFixed(1)}</div>
@@ -2524,7 +2524,7 @@ export default function SessionFinancialReportPage() {
                       </div>
                     </div>
 
-                    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white p-3">
+                    <div className="mobile-scroll-x rounded-xl border border-slate-200 bg-white p-3">
                       <svg viewBox={`0 0 ${riskDebtModel.width} ${riskDebtModel.height}`} className="min-w-[720px] w-full" role="img" aria-label="Risk debt trend chart">
                         <rect x="0" y="0" width={riskDebtModel.width} height={riskDebtModel.height} fill="white" />
 
@@ -2616,7 +2616,7 @@ export default function SessionFinancialReportPage() {
                   <div className="text-sm text-slate-600">Rank movement forensics will appear once session score timeline is available.</div>
                 ) : (
                   <>
-                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-4">
+                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
                       <div className="rounded-xl border border-slate-200 bg-white p-3">
                         <div className="text-slate-500">Current rank</div>
                         <div className="mt-1 text-lg font-semibold text-slate-900">#{rankMovementModel.latest.rank}</div>
@@ -2637,7 +2637,7 @@ export default function SessionFinancialReportPage() {
                       </div>
                     </div>
 
-                    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white p-3">
+                    <div className="mobile-scroll-x rounded-xl border border-slate-200 bg-white p-3">
                       <svg viewBox={`0 0 ${rankMovementModel.width} ${rankMovementModel.height}`} className="min-w-[720px] w-full" role="img" aria-label="Rank movement chart">
                         <rect x="0" y="0" width={rankMovementModel.width} height={rankMovementModel.height} fill="white" />
 
@@ -2710,7 +2710,7 @@ export default function SessionFinancialReportPage() {
                   <div className="text-sm text-slate-600">Play at least one financial year to unlock the what-if simulator.</div>
                 ) : (
                   <>
-                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-4">
+                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
                       <div className="rounded-xl border border-cyan-200 bg-gradient-to-br from-cyan-50 to-white p-3">
                         <div className="text-slate-500">Projected FY points</div>
                         <div className="mt-1 text-xl font-semibold text-slate-900">{whatIfProjection.projectedPoints}</div>
@@ -3039,7 +3039,7 @@ export default function SessionFinancialReportPage() {
                   <div className="text-sm text-slate-600">Promote at least one scenario to unlock promotion impact analytics.</div>
                 ) : (
                   <>
-                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-4">
+                    <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
                       <div className="rounded-xl border border-slate-200 bg-white p-3">
                         <div className="text-slate-500">Total promotions</div>
                         <div className="mt-1 text-lg font-semibold text-slate-900">{promotionImpactModel.details.length}</div>
@@ -3150,7 +3150,7 @@ export default function SessionFinancialReportPage() {
                   </div>
                 ) : (
                   <>
-                    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white p-3">
+                    <div className="mobile-scroll-x rounded-xl border border-slate-200 bg-white p-3">
                       <svg viewBox={`0 0 ${chartModel.width} ${chartModel.height}`} className="min-w-[720px] w-full" role="img" aria-label="Comparative financial year line chart">
                         <rect x="0" y="0" width={chartModel.width} height={chartModel.height} fill="white" />
 
@@ -3560,7 +3560,7 @@ export default function SessionFinancialReportPage() {
                     </button>
                   </div>
                 ) : null}
-                <div className="overflow-x-auto">
+                <div className="mobile-scroll-x">
                   <table className="min-w-full text-left text-sm">
                     <thead>
                       <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">

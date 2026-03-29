@@ -4,11 +4,14 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
+import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Tooltip } from "@/components/ui/Tooltip";
+import { buildDeterministicRoundDebrief } from "@/lib/aiDebrief";
+import { generateCausalInsights } from "@/lib/causalDebrief";
 import { getSupabaseClient } from "@/lib/supabaseClient";
 import { evaluateKpiAchievement, parseKpiTarget } from "@/lib/kpi";
-import type { RoundResult } from "@/lib/simEngine";
+import type { DecisionDraft, RoundResult } from "@/lib/simEngine";
 
 type RouteParams = {
   sessionId?: string;
@@ -31,6 +34,18 @@ type TeamRow = {
   team_name: string;
   total_points: number | null;
   kpi_target: string | null;
+};
+
+type DecisionRow = {
+  focus_cost: number;
+  focus_quality: number;
+  focus_stakeholder: number;
+  focus_speed: number;
+  risk_appetite: DecisionDraft["risk_appetite"];
+  governance_intensity: DecisionDraft["governance_intensity"];
+  buffer_percent: number;
+  vendor_strategy: DecisionDraft["vendor_strategy"];
+  raw: Record<string, unknown> | null;
 };
 
 type TeamResultRow = {
@@ -61,6 +76,32 @@ function formatCurrencyInr(value: number) {
 
 function toNumber(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function metricBadgeTone(metric: string) {
+  if (metric === "SPI") return "border-cyan-400/20 bg-cyan-400/10 text-cyan-100";
+  if (metric === "CPI") return "border-amber-400/25 bg-amber-400/10 text-amber-100";
+  if (metric === "Safety") return "border-rose-400/25 bg-rose-400/10 text-rose-100";
+  if (metric === "Quality") return "border-violet-400/25 bg-violet-400/10 text-violet-100";
+  if (metric === "Stakeholder") return "border-emerald-400/25 bg-emerald-400/10 text-emerald-100";
+  if (metric === "KPI") return "border-fuchsia-400/25 bg-fuchsia-400/10 text-fuchsia-100";
+  return "border-white/10 bg-white/5 text-slate-200";
+}
+
+function impactBorderTone(impact: "positive" | "negative" | "neutral") {
+  if (impact === "positive") return "border-l-emerald-400";
+  if (impact === "negative") return "border-l-rose-400";
+  return "border-l-slate-500";
+}
+
+function sortInsights<T extends { impact: "positive" | "negative" | "neutral" }>(insights: T[]) {
+  const weights: Record<"positive" | "negative" | "neutral", number> = {
+    negative: 0,
+    positive: 1,
+    neutral: 2,
+  };
+
+  return [...insights].sort((a, b) => weights[a.impact] - weights[b.impact]);
 }
 
 function getRoundPerformance(points: number) {
@@ -133,7 +174,10 @@ export default function RoundResultsPage() {
   const [error, setError] = useState("");
   const [session, setSession] = useState<SessionRow | null>(null);
   const [team, setTeam] = useState<TeamRow | null>(null);
+  const [decision, setDecision] = useState<DecisionRow | null>(null);
   const [result, setResult] = useState<TeamResultRow | null>(null);
+  const [previousResult, setPreviousResult] = useState<TeamResultRow | null>(null);
+  const [showAllInsights, setShowAllInsights] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -208,19 +252,56 @@ export default function RoundResultsPage() {
         return;
       }
 
-      const { data: resultData, error: resultError } = await supabase
-        .from("team_results")
-        .select(
-          "session_id,team_id,round_number,schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,detail"
-        )
-        .eq("session_id", sessionId)
-        .eq("team_id", myTeam.id)
-        .eq("round_number", roundNumber)
-        .maybeSingle();
+      const teamResultSelect =
+        "session_id,team_id,round_number,schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,detail";
 
-      if (resultError) {
+      const [resultResponse, decisionResponse, previousResultResponse] = await Promise.all([
+        supabase
+          .from("team_results")
+          .select(teamResultSelect)
+          .eq("session_id", sessionId)
+          .eq("team_id", myTeam.id)
+          .eq("round_number", roundNumber)
+          .maybeSingle(),
+        supabase
+          .from("decisions")
+          .select(
+            "focus_cost,focus_quality,focus_stakeholder,focus_speed,risk_appetite,governance_intensity,buffer_percent,vendor_strategy,raw"
+          )
+          .eq("session_id", sessionId)
+          .eq("team_id", myTeam.id)
+          .eq("round_number", roundNumber)
+          .maybeSingle(),
+        roundNumber > 1
+          ? supabase
+              .from("team_results")
+              .select(teamResultSelect)
+              .eq("session_id", sessionId)
+              .eq("team_id", myTeam.id)
+              .eq("round_number", roundNumber - 1)
+              .maybeSingle()
+          : Promise.resolve({ data: null, error: null }),
+      ]);
+
+      if (resultResponse.error) {
         if (!cancelled) {
-          setError(resultError.message);
+          setError(resultResponse.error.message);
+          setLoading(false);
+        }
+        return;
+      }
+
+      if (decisionResponse.error) {
+        if (!cancelled) {
+          setError(decisionResponse.error.message);
+          setLoading(false);
+        }
+        return;
+      }
+
+      if (previousResultResponse.error) {
+        if (!cancelled) {
+          setError(previousResultResponse.error.message);
           setLoading(false);
         }
         return;
@@ -229,7 +310,9 @@ export default function RoundResultsPage() {
       if (!cancelled) {
         setSession((sessionResponse.data as SessionRow | null) ?? null);
         setTeam(myTeam);
-        setResult((resultData as TeamResultRow | null) ?? null);
+        setDecision((decisionResponse.data as DecisionRow | null) ?? null);
+        setResult((resultResponse.data as TeamResultRow | null) ?? null);
+        setPreviousResult((previousResultResponse.data as TeamResultRow | null) ?? null);
         setLoading(false);
       }
     };
@@ -241,13 +324,18 @@ export default function RoundResultsPage() {
     };
   }, [roundNumber, sessionId, supabase]);
 
+  useEffect(() => {
+    setShowAllInsights(false);
+  }, [roundNumber, result?.team_id]);
+
   const pointsThisRound = Math.max(0, Math.round(result?.points_earned ?? 0));
   const pointsPerformance = getRoundPerformance(pointsThisRound);
   const roundPerformancePct = clampPercent((pointsThisRound / 800) * 100);
   const cashClosing = result?.cash_closing ?? 0;
   const cashState = getCashClosingState(cashClosing);
-  const latePenalty = toNumber(result?.detail?.late_points_penalty, 0);
-  const basePoints = Math.round(toNumber(result?.detail?.base_points, pointsThisRound));
+  const resultDetail = (result?.detail ?? null) as Record<string, any> | null;
+  const latePenalty = toNumber(resultDetail?.kpi?.late_points_penalty, 0);
+  const basePoints = Math.round(toNumber(resultDetail?.kpi?.base_points, pointsThisRound));
   const normalizedResult: RoundResult | null = result
     ? {
         schedule_index: toNumber(result.schedule_index, 0),
@@ -262,9 +350,72 @@ export default function RoundResultsPage() {
         detail: result.detail ?? {},
       }
     : null;
+  const normalizedPreviousResult: RoundResult | null = previousResult
+    ? {
+        schedule_index: toNumber(previousResult.schedule_index, 0),
+        cost_index: toNumber(previousResult.cost_index, 0),
+        cash_closing: toNumber(previousResult.cash_closing, 0),
+        quality_score: toNumber(previousResult.quality_score, 0),
+        safety_score: toNumber(previousResult.safety_score, 0),
+        stakeholder_score: toNumber(previousResult.stakeholder_score, 0),
+        claim_entitlement_score: toNumber(previousResult.claim_entitlement_score, 0),
+        points_earned: toNumber(previousResult.points_earned, 0),
+        penalties: toNumber(previousResult.penalties, 0),
+        detail: previousResult.detail ?? {},
+      }
+    : null;
+  const decisionDraft: Partial<DecisionDraft> | null = decision
+    ? {
+        focus_cost: toNumber(decision.focus_cost, 0),
+        focus_quality: toNumber(decision.focus_quality, 0),
+        focus_stakeholder: toNumber(decision.focus_stakeholder, 0),
+        focus_speed: toNumber(decision.focus_speed, 0),
+        risk_appetite: decision.risk_appetite,
+        governance_intensity: decision.governance_intensity,
+        buffer_percent: toNumber(decision.buffer_percent, 0),
+        vendor_strategy: decision.vendor_strategy,
+      }
+    : null;
   const kpiTarget = parseKpiTarget(team?.kpi_target ?? null);
   const kpiEvaluation =
     kpiTarget && normalizedResult ? evaluateKpiAchievement(kpiTarget, normalizedResult) : null;
+  const causalInsights = useMemo(() => {
+    if (!normalizedResult) return [];
+
+    const decisionPayload = {
+      ...(decision?.raw ?? {}),
+      focus_cost: decision?.focus_cost,
+      focus_quality: decision?.focus_quality,
+      focus_stakeholder: decision?.focus_stakeholder,
+      focus_speed: decision?.focus_speed,
+    };
+
+    const resultPayload = {
+      ...normalizedResult,
+      detail: normalizedResult.detail ?? {},
+      kpiAchieved: kpiEvaluation?.achieved,
+      kpiMetric: kpiEvaluation?.metricKey,
+    };
+
+    return sortInsights(
+      generateCausalInsights(
+        decisionPayload,
+        resultPayload,
+        normalizedPreviousResult
+          ? {
+              ...normalizedPreviousResult,
+              detail: normalizedPreviousResult.detail ?? {},
+            }
+          : null
+      )
+    );
+  }, [decision, kpiEvaluation?.achieved, kpiEvaluation?.metricKey, normalizedPreviousResult, normalizedResult]);
+  const visibleCausalInsights = showAllInsights ? causalInsights : causalInsights.slice(0, 5);
+  const hiddenInsightCount = Math.max(0, causalInsights.length - visibleCausalInsights.length);
+  const aiDebrief = useMemo(() => {
+    if (!normalizedResult) return null;
+    return buildDeterministicRoundDebrief(normalizedResult, decisionDraft);
+  }, [decisionDraft, normalizedResult]);
 
   return (
     <RequireAuth>
@@ -476,6 +627,129 @@ export default function RoundResultsPage() {
                   </div>
                 </CardBody>
               </Card>
+
+              <Card className="border-white/10 bg-slate-900/70">
+                <CardHeader
+                  title="What Happened This Round"
+                  subtitle="Cause-and-effect signals from your decisions, score shifts, and round shocks"
+                />
+                <CardBody className="space-y-4">
+                  {visibleCausalInsights.length > 0 ? (
+                    <div className="space-y-3">
+                      {visibleCausalInsights.map((insight, index) => (
+                        <div
+                          key={`${insight.metric}-${index}-${insight.decision}`}
+                          className={`flex items-start justify-between gap-4 rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4 border-l-4 ${impactBorderTone(insight.impact)}`}
+                        >
+                          <div className="min-w-0 space-y-2">
+                            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                              {insight.decision}
+                            </div>
+                            <div className="text-base font-bold leading-6 text-white">{insight.outcome}</div>
+                            <div className="text-sm italic text-teal-300">
+                              Next round: {insight.advice}
+                            </div>
+                          </div>
+                          <div
+                            className={`shrink-0 rounded-full border px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.18em] ${metricBadgeTone(insight.metric)}`}
+                          >
+                            {insight.metric}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border border-dashed border-white/10 bg-slate-950/50 px-4 py-5 text-sm text-slate-400">
+                      No standout causal signals were detected beyond the scorecard this round.
+                    </div>
+                  )}
+
+                  {hiddenInsightCount > 0 ? (
+                    <Button
+                      variant="secondary"
+                      className="w-full border-white/10 bg-slate-950 text-slate-200 hover:bg-slate-900"
+                      onClick={() => setShowAllInsights(true)}
+                    >
+                      Show all insights ({causalInsights.length})
+                    </Button>
+                  ) : null}
+                </CardBody>
+              </Card>
+
+              {aiDebrief ? (
+                <Card className="border-white/10 bg-slate-900/70">
+                  <CardHeader
+                    title="AI Debrief"
+                    subtitle="Deterministic coaching based on your round outcome and weakest execution concepts"
+                  />
+                  <CardBody className="space-y-5">
+                    <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-4 text-sm text-cyan-50">
+                      {aiDebrief.summary}
+                    </div>
+
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
+                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
+                          Strengths
+                        </div>
+                        <div className="mt-3 space-y-2 text-sm text-slate-200">
+                          {aiDebrief.strengths.map((item) => (
+                            <div key={item} className="rounded-xl border border-emerald-500/15 bg-emerald-500/5 px-3 py-3">
+                              {item}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
+                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
+                          Risks To Watch
+                        </div>
+                        <div className="mt-3 space-y-2 text-sm text-slate-200">
+                          {aiDebrief.risks.map((item) => (
+                            <div key={item} className="rounded-xl border border-amber-500/15 bg-amber-500/5 px-3 py-3">
+                              {item}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
+                          Practice Actions
+                        </div>
+                        <Link
+                          href={`/sessions/${sessionId}/round/${roundNumber}/practice`}
+                          className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200 transition hover:text-cyan-100"
+                        >
+                          Open practice
+                        </Link>
+                      </div>
+                      <div className="mt-3 grid gap-3 md:grid-cols-3">
+                        {aiDebrief.actions.map((action) => (
+                          <div
+                            key={`${action.concept_code}-${action.title}`}
+                            className="rounded-2xl border border-white/10 bg-slate-900/70 px-4 py-4"
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-sm font-bold text-white">{action.title}</div>
+                              <div className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-300">
+                                {action.concept_code}
+                              </div>
+                            </div>
+                            <div className="mt-2 text-sm text-slate-300">{action.why}</div>
+                            <div className="mt-3 text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">
+                              {action.practice_minutes} min drill
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </CardBody>
+                </Card>
+              ) : null}
             </>
           )}
         </div>
