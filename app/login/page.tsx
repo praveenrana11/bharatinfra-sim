@@ -7,11 +7,13 @@ import { getSupabaseClient } from "@/lib/supabaseClient";
 type LoginMode = "magic-link" | "password";
 
 const PASSWORD_LOGIN_ENABLED =
-  process.env.NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN === "true";
+  process.env.NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN !== "false";
+
+const DEFAULT_LOGIN_MODE: LoginMode = PASSWORD_LOGIN_ENABLED ? "password" : "magic-link";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [mode, setMode] = useState<LoginMode>("magic-link");
+  const [mode, setMode] = useState<LoginMode>(DEFAULT_LOGIN_MODE);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loadingMode, setLoadingMode] = useState<LoginMode | null>(null);
@@ -97,23 +99,13 @@ export default function LoginPage() {
           </p>
           <h1 className="text-2xl font-semibold text-slate-950">Sign in</h1>
           <p className="text-sm leading-6 text-slate-600">
-            Magic link stays the default sign-in path. Password login is an optional fallback for
-            review and deep testing.
+            Password login is available by default so teams can keep moving when magic-link sends
+            are rate-limited. Magic link remains available as a fallback.
           </p>
         </div>
 
         {PASSWORD_LOGIN_ENABLED ? (
           <div className="grid grid-cols-2 rounded-xl bg-slate-100 p-1 text-sm font-medium text-slate-600">
-            <button
-              type="button"
-              onClick={() => switchMode("magic-link")}
-              className={`rounded-lg px-3 py-2 transition ${
-                mode === "magic-link" ? "bg-white text-slate-950 shadow-sm" : "hover:text-slate-950"
-              }`}
-              aria-pressed={mode === "magic-link"}
-            >
-              Magic Link
-            </button>
             <button
               type="button"
               onClick={() => switchMode("password")}
@@ -123,6 +115,16 @@ export default function LoginPage() {
               aria-pressed={mode === "password"}
             >
               Password
+            </button>
+            <button
+              type="button"
+              onClick={() => switchMode("magic-link")}
+              className={`rounded-lg px-3 py-2 transition ${
+                mode === "magic-link" ? "bg-white text-slate-950 shadow-sm" : "hover:text-slate-950"
+              }`}
+              aria-pressed={mode === "magic-link"}
+            >
+              Magic Link
             </button>
           </div>
         ) : null}
@@ -222,8 +224,8 @@ export default function LoginPage() {
 
         {!PASSWORD_LOGIN_ENABLED ? (
           <p className="text-xs leading-5 text-slate-500">
-            Password login is currently disabled. To expose the review fallback, set
-            `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN=true`.
+            Password login is currently hidden. To keep this page on magic-link only, set
+            `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN=false`.
           </p>
         ) : null}
       </div>

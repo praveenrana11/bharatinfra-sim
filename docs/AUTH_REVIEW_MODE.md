@@ -1,12 +1,12 @@
 # Auth Review Mode
 
-This app keeps email magic links as the primary sign-in flow and adds password login only as a
-review and deep-testing fallback.
+This app exposes password login by default and keeps email magic links available as a fallback for
+teams that hit resend limits during review or testing.
 
 ## What stays true
 
-- Magic link remains the default sign-in mode.
-- Password login is shown only when `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN=true`.
+- Password login is shown by default.
+- Set `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN=false` if you need a magic-link-only build.
 - Client code uses only `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
 - Do not place a service-role key in client code.
 - Do not add admin-bypass routes for reviewers.
@@ -22,8 +22,8 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000
 NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN=true
 ```
 
-If you omit `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN` or set it to anything other than `true`, the login
-page will show only the magic-link flow.
+If you omit `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN`, the login page will expose both password and
+magic-link sign-in. Set it to `false` only if you need to hide password login.
 
 ## Vercel environment variables
 
@@ -36,7 +36,7 @@ In Vercel:
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
    - `NEXT_PUBLIC_APP_URL`
-   - `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN` with value `true`
+   - Optional: `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN` with value `false` if you want to hide password login
 5. Save the variables.
 6. Redeploy so the client bundle picks up the new public env values.
 
@@ -93,7 +93,7 @@ Notes:
 
 ### Magic link login
 
-1. Set `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN=false` or unset it.
+1. Set `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN=false`.
 2. Open `/login` and confirm only the magic-link UI is visible.
 3. Submit a valid email.
 4. Confirm the success message appears.
@@ -102,7 +102,7 @@ Notes:
 
 ### Password login
 
-1. Set `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN=true`.
+1. Leave `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN` unset or set it to `true`.
 2. Open `/login` and confirm the `Magic Link` and `Password` tabs are both visible.
 3. Switch to `Password`.
 4. Sign in with the pre-created reviewer account.
