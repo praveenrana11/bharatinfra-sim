@@ -238,128 +238,154 @@ export default function DashboardPage() {
     }
   }
 
+  const activeMissions = mySessions.filter((m) => m.session.status !== "complete");
+  const sortedLeaderboard = [...mySessions].sort((a, b) => b.team.total_points - a.team.total_points);
+
   return (
     <RequireAuth>
       <Page>
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
           <div>
-            <PageTitle>Dashboard</PageTitle>
-            <PageSubTitle>Signed in as: {email || "-"}</PageSubTitle>
+            <PageTitle>The Arena</PageTitle>
+            <PageSubTitle>Operative: {email || "-"}</PageSubTitle>
           </div>
 
-          <div className="flex items-center gap-3">
-            <Link className="text-sm text-slate-600 underline hover:text-slate-900" href="/admin">
-              Facilitator Console
-            </Link>
-            <Link className="text-sm text-slate-600 underline hover:text-slate-900" href="/">
-              Home
-            </Link>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+            <div className="flex gap-4">
+              <div className="flex flex-col items-center justify-center rounded-lg border border-white/10 bg-slate-900/50 px-6 py-2">
+                <span className="text-xs font-bold uppercase tracking-widest text-slate-500">Total XP</span>
+                <span className="text-xl font-black text-blue-400">
+                  {mySessions.reduce((acc, curr) => acc + curr.team.total_points, 0)}
+                </span>
+              </div>
+              <div className="flex flex-col items-center justify-center rounded-lg border border-white/10 bg-slate-900/50 px-6 py-2">
+                <span className="text-xs font-bold uppercase tracking-widest text-slate-500">Global Rank</span>
+                <span className="text-xl font-black text-emerald-400">#42</span>
+              </div>
+            </div>
           </div>
         </div>
 
         {error ? (
-          <Alert variant="error" className="mt-4">
+          <Alert variant="error" className="mt-6">
             {error}
           </Alert>
         ) : null}
 
-        <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <div className="space-y-6">
+        <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-12">
+          {/* LEFT COL: ACTIVE MISSIONS & JOIN */}
+          <div className="space-y-6 lg:col-span-8">
             <Card>
-              <CardHeader title="Create a new session" subtitle="Start a fresh simulation for your team." />
+              <CardHeader title="Active Missions" subtitle="Missions requiring your immediate strategic input." />
               <CardBody className="space-y-4">
-                <div>
-                  <Label htmlFor="scenario">Scenario</Label>
-                  <select
-                    id="scenario"
-                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
-                    value={scenarioId}
-                    onChange={(e) => setScenarioId(e.target.value)}
-                  >
-                    {scenarios.map((scenario) => (
-                      <option key={scenario.id} value={scenario.id}>
-                        {scenario.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <Label htmlFor="sessionName">Session name</Label>
-                  <Input id="sessionName" value={sessionName} onChange={(e) => setSessionName(e.target.value)} />
-                </div>
-
-                <div>
-                  <Label htmlFor="roundCount">Round count</Label>
-                  <Input
-                    id="roundCount"
-                    type="number"
-                    min={1}
-                    max={12}
-                    value={roundCount}
-                    onChange={(e) => setRoundCount(Number(e.target.value))}
-                  />
-                </div>
-
-                <Button onClick={handleCreateSession} disabled={creating}>
-                  {creating ? "Creating..." : "Create session"}
-                </Button>
-              </CardBody>
-            </Card>
-
-            <Card>
-              <CardHeader title="Join by session code" subtitle="Enter a code shared by the session host." />
-              <CardBody className="space-y-4">
-                <div>
-                  <Label htmlFor="joinCode">Session code</Label>
-                  <Input
-                    id="joinCode"
-                    placeholder="BI-XXXXXX"
-                    value={joinCode}
-                    onChange={(e) => setJoinCode(e.target.value)}
-                  />
-                </div>
-
-                <Button variant="secondary" onClick={handleJoinByCode} disabled={joining}>
-                  {joining ? "Joining..." : "Join"}
-                </Button>
-              </CardBody>
-            </Card>
-          </div>
-
-          <Card className="h-fit">
-            <CardHeader
-              title="My sessions"
-              subtitle={mySessions.length ? "Your active / joined sessions." : "No sessions yet. Create or join one."}
-            />
-            <CardBody className="space-y-3">
-              {mySessions.length === 0 ? (
-                <div className="text-sm text-slate-600">Nothing to show yet.</div>
-              ) : (
-                mySessions.map(({ session, team }) => (
-                  <div key={`${session.id}-${team.id}`} className="rounded-md border border-slate-200 p-4">
-                    <div className="flex items-start justify-between gap-3">
+                {activeMissions.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-slate-700 bg-slate-900/50 p-8 text-center text-sm text-slate-500">
+                    No active missions. Join or create one below.
+                  </div>
+                ) : (
+                  activeMissions.map(({ session, team }) => (
+                    <div
+                      key={`${session.id}-${team.id}`}
+                      className="group relative flex flex-col justify-between gap-4 rounded-xl border border-slate-700 bg-slate-900/40 p-5 transition-all hover:border-blue-500/50 hover:bg-slate-800/60 sm:flex-row sm:items-center"
+                    >
                       <div>
-                        <div className="font-semibold text-slate-900">{session.name ?? "Untitled session"}</div>
-                        <div className="mt-1 text-sm text-slate-600">
-                          Code: <span className="font-mono">{session.code}</span> | Status: {session.status} | Round{" "}
-                          {session.current_round}/{session.round_count}
+                        <div className="flex items-center gap-3">
+                          <div className="h-3 w-3 animate-pulse rounded-full bg-blue-500" />
+                          <h3 className="text-lg font-bold text-white">{session.name ?? "Classified Mission"}</h3>
                         </div>
-                        <div className="mt-1 text-sm text-slate-600">
-                          Team: <span className="font-mono">{team.team_name}</span> | Points:{" "}
-                          <span className="font-semibold text-slate-900">{team.total_points}</span>
+                        <div className="mt-2 flex items-center gap-4 text-xs font-medium text-slate-400">
+                          <span className="flex items-center gap-1">
+                            <span className="text-slate-500">CODE:</span> <span className="font-mono text-blue-300">{session.code}</span>
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="text-slate-500">PHASE:</span> <span className="text-emerald-400">{session.current_round}/{session.round_count}</span>
+                          </span>
                         </div>
                       </div>
 
-                      <Link className="text-sm underline text-slate-700 hover:text-slate-900" href={`/sessions/${session.id}`}>
-                        Open
+                      <Link href={`/sessions/${session.id}`} className="shrink-0">
+                        <Button className="w-full sm:w-auto text-xs shadow-blue-500/20">RESUME MISSION</Button>
                       </Link>
                     </div>
+                  ))
+                )}
+              </CardBody>
+            </Card>
+
+            <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+              <Card>
+                <CardHeader title="Join by Code" subtitle="Enter a code from your Game Master." />
+                <CardBody className="space-y-4">
+                  <div>
+                    <Label htmlFor="joinCode" className="text-slate-400">Session Code</Label>
+                    <Input
+                      id="joinCode"
+                      placeholder="BI-XXXXXX"
+                      value={joinCode}
+                      onChange={(e) => setJoinCode(e.target.value)}
+                      className="font-mono uppercase"
+                    />
                   </div>
-                ))
-              )}
-            </CardBody>
-          </Card>
+                  <Button variant="secondary" onClick={handleJoinByCode} disabled={joining} className="w-full">
+                    {joining ? "Joining..." : "Join Mission"}
+                  </Button>
+                </CardBody>
+              </Card>
+
+              <Card>
+                <CardHeader title="Create Mission" subtitle="Host a new simulation for your team." />
+                <CardBody className="space-y-4">
+                  <div>
+                    <Label htmlFor="scenario" className="text-slate-400">Scenario</Label>
+                    <select
+                      id="scenario"
+                      className="mt-1 block w-full rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm text-white shadow-inner focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                      value={scenarioId}
+                      onChange={(e) => setScenarioId(e.target.value)}
+                    >
+                      {scenarios.map((scenario) => (
+                        <option key={scenario.id} value={scenario.id}>
+                          {scenario.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <Button variant="ghost" onClick={handleCreateSession} disabled={creating} className="w-full border border-slate-700">
+                    {creating ? "Creating..." : "Create Host Session"}
+                  </Button>
+                </CardBody>
+              </Card>
+            </div>
+          </div>
+
+          {/* RIGHT COL: LEADERBOARD */}
+          <div className="lg:col-span-4">
+            <Card className="h-full">
+              <CardHeader title="Global Leaderboard" subtitle="Top performers across your network." />
+              <CardBody className="space-y-2">
+                {sortedLeaderboard.length === 0 ? (
+                  <div className="text-sm text-slate-500 text-center py-6">No ranked data available.</div>
+                ) : (
+                  sortedLeaderboard.map(({ session, team }, index) => (
+                    <div key={`${session.id}-${team.id}`} className="flex flex-col gap-1 rounded-lg border border-white/5 bg-slate-900/30 p-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${index === 0 ? 'bg-amber-500/20 text-amber-400' : index === 1 ? 'bg-slate-300/20 text-slate-300' : index === 2 ? 'bg-orange-700/20 text-orange-400' : 'bg-slate-800 text-slate-500'}`}>
+                            {index + 1}
+                          </span>
+                          <span className="font-semibold text-white text-sm">{team.team_name}</span>
+                        </div>
+                        <span className="font-mono text-sm font-bold text-blue-400">{team.total_points}</span>
+                      </div>
+                      <div className="ml-8 text-[10px] uppercase tracking-wider text-slate-500 truncate">
+                        {session.name}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </CardBody>
+            </Card>
+          </div>
         </div>
       </Page>
     </RequireAuth>

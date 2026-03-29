@@ -6,16 +6,20 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
 import { getSupabaseClient } from "@/lib/supabaseClient";
+import { scoreRoundSecureClient } from "@/lib/secureRoundScoring";
+import { setTeamKpiTargetSecureClient } from "@/lib/secureTeamKpi";
 import {
   computeRoundResultV2,
   DecisionDraft,
-  RoundResult,
   RiskAppetite,
   Governance,
   VendorStrategy,
 } from "@/lib/simEngine";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { DecisionSlider } from "@/components/DecisionSlider";
+import { SegmentedControl } from "@/components/SegmentedControl";
+import RoundBriefingCard from "@/components/RoundBriefingCard";
 import {
   DecisionProfile,
   DEFAULT_DECISION_PROFILE,
@@ -39,9 +43,10 @@ import {
   BudgetBreakdown,
 } from "@/lib/decisionProfile";
 import { ConstructionEvent, getRoundConstructionEvents } from "@/lib/constructionNews";
-import { KPI_TARGET_OPTIONS, KpiTarget, parseKpiTarget, evaluateKpiAchievement, applyKpiMultiplier } from "@/lib/kpi";
+import { KPI_TARGET_OPTIONS, KpiTarget, parseKpiTarget, evaluateKpiAchievement } from "@/lib/kpi";
 import { getNewsImageUrl } from "@/lib/newsVisuals";
 import { parseConstructionEvents } from "@/lib/newsPayload";
+import { getRoundEvents, GameEvent } from "@/lib/eventDeck";
 
 const externalContextOptions: Array<{ value: ExternalContext; icon: string; text: string }> = [
   { value: "Stable Environment", icon: "ST", text: "Stable environment" },
@@ -142,6 +147,14 @@ type LatePenaltyResult = {
   extensionMode: boolean;
 };
 
+type EngagementMission = {
+  id: string;
+  title: string;
+  target: string;
+  impact: string;
+  done: boolean;
+};
+
 function createInitialStepDurations(): Record<StepIndex, number> {
   return { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 };
 }
@@ -163,9 +176,26 @@ type ExistingDecisionRow = DecisionDraft & {
   locked: boolean;
 };
 
-type TeamResultSummaryRow = { points_earned: number | null };
-type PrevDecisionRawRow = { raw: Record<string, unknown> | null };
 type SessionRoundRow = { deadline_at: string; status: string | null; news_payload: unknown };
+
+type ScenarioPromotionRow = {
+  id: string;
+  source_scenario_name: string | null;
+  promotion_payload: Record<string, unknown> | null;
+  applied_at: string | null;
+};
+
+type ForecastState = {
+  predicted_schedule_index: number;
+  predicted_cost_index: number;
+  confidence: number;
+};
+
+const DEFAULT_FORECAST: ForecastState = {
+  predicted_schedule_index: 1,
+  predicted_cost_index: 1,
+  confidence: 50,
+};
 
 const defaultForm: ExtendedDecisionForm = {
   focus_cost: 25,
@@ -270,6 +300,29 @@ const sectorVisuals: Record<ConstructionSector, SectorVisualMeta> = {
 };
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
+}
+
+function parsePromotionNumber(value: unknown, fallback: number, min: number, max: number) {
+  if (typeof value === "number" && Number.isFinite(value)) return clamp(value, min, max);
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return clamp(parsed, min, max);
+  }
+  return clamp(fallback, min, max);
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  return value as Record<string, unknown>;
+}
+
+function toText(value: unknown, fallback: string) {
+  return typeof value === "string" ? value : fallback;
+}
+
+function toEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  if (typeof value !== "string") return fallback;
+  return (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
 }
 
 function toErrorMessage(error: unknown, fallback: string) {
@@ -596,6 +649,8 @@ export default function RoundDecisionPage() {
   const [loading, setLoading] = useState(true);
   const [locked, setLocked] = useState(false);
   const [error, setError] = useState("");
+  const [promotionNotice, setPromotionNotice] = useState("");
+  const [promotionWarning, setPromotionWarning] = useState("");
   const [saving, setSaving] = useState(false);
   const [locking, setLocking] = useState(false);
 
@@ -611,6 +666,12 @@ export default function RoundDecisionPage() {
   const [teamKpiTarget, setTeamKpiTarget] = useState<KpiTarget | null>(null);
   const [draftKpiTarget, setDraftKpiTarget] = useState<KpiTarget | null>(null);
   const [savingKpiTarget, setSavingKpiTarget] = useState(false);
+  const deckEvents = useMemo<GameEvent[]>(() => {
+    if (!sessionId || !teamId) return [];
+    return getRoundEvents(sessionId, teamId, roundNumber);
+  }, [roundNumber, sessionId, teamId]);
+  const [eventsChosen, setEventsChosen] = useState<Record<string, string>>({});
+  const [forecast, setForecast] = useState<ForecastState>(DEFAULT_FORECAST);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [stepDurationsMs, setStepDurationsMs] = useState<Record<StepIndex, number>>(createInitialStepDurations);
 
@@ -702,6 +763,11 @@ export default function RoundDecisionPage() {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
+  function updateEventChoice(eventId: string, choiceId: string) {
+    setHasUnsavedChanges(true);
+    setEventsChosen((prev) => ({ ...prev, [eventId]: choiceId }));
+  }
+
   function buildStepTimingSnapshot(nowMs = Date.now()) {
     const snapshot = { ...stepDurationsMs } as Record<StepIndex, number>;
     const currentStep = activeStepRef.current;
@@ -766,20 +832,22 @@ export default function RoundDecisionPage() {
       return null;
     }
 
-    if (!teamId) throw new Error("Team not loaded yet.");
-
     setSavingKpiTarget(true);
     try {
-      const nowIso = new Date().toISOString();
-      const { error: teamErr } = await supabase
-        .from("teams")
-        .update({ kpi_target: selected, kpi_selected_at: nowIso })
-        .eq("id", teamId);
+      const saved = await setTeamKpiTargetSecureClient({
+        supabase,
+        sessionId,
+        kpiTarget: selected,
+      });
 
-      if (teamErr) throw teamErr;
+      const parsed = parseKpiTarget(saved.kpiTarget);
+      if (!parsed) {
+        throw new Error("Server returned invalid KPI target.");
+      }
 
-      setTeamKpiTarget(selected);
-      return selected;
+      setTeamKpiTarget(parsed);
+      setDraftKpiTarget(parsed);
+      return parsed;
     } finally {
       setSavingKpiTarget(false);
     }
@@ -858,6 +926,95 @@ export default function RoundDecisionPage() {
   }, [clockNow, lockWindowExpired, msLeft, previewResult.points_earned, roundClockSource, roundDeadlineIso]);
 
   const currentStepMinutes = (liveStepDurationsMs[activeStep] / 60000).toFixed(1);
+  const totalStepMinutes = Object.values(liveStepDurationsMs).reduce((sum, value) => sum + value, 0) / 60000;
+  const completedStepCount = (Object.keys(stepValidations) as Array<`${StepIndex}`>).reduce((count, key) => {
+    const stepKey = Number(key) as StepIndex;
+    return count + (stepValidations[stepKey] ? 1 : 0);
+  }, 0);
+
+  const kpiPreview = useMemo(() => {
+    const selectedKpi = parseKpiTarget(teamKpiTarget || draftKpiTarget);
+    if (!selectedKpi) return null;
+    return evaluateKpiAchievement(selectedKpi, previewResult);
+  }, [draftKpiTarget, previewResult, teamKpiTarget]);
+
+  const engagementMissions = useMemo<EngagementMission[]>(() => {
+    return [
+      {
+        id: "delivery",
+        title: "Balanced delivery",
+        target: "SPI >= 1.00 and CPI >= 1.00",
+        impact: "Improves schedule-cost consistency and rank stability.",
+        done: previewResult.schedule_index >= 1 && previewResult.cost_index >= 1,
+      },
+      {
+        id: "workforce",
+        title: "Safe workforce tempo",
+        target: "Safety >= 78 and avoid overloaded crews",
+        impact: "Reduces high-penalty risk from execution stress.",
+        done: previewResult.safety_score >= 78 && form.workforce_load_state !== "Overloaded",
+      },
+      {
+        id: "ethics",
+        title: "Ethics shield",
+        target: "No high-risk facilitation and low exposure",
+        impact: "Protects stakeholder trust and legal resilience.",
+        done: form.compliance_posture !== "High-Risk Facilitation" && form.facilitation_budget_index <= 30,
+      },
+      {
+        id: "kpi",
+        title: "KPI strike",
+        target: "Preview should meet your selected KPI target",
+        impact: "Unlocks 4x points multiplier for the round.",
+        done: Boolean(kpiPreview?.achieved),
+      },
+    ];
+  }, [
+    form.compliance_posture,
+    form.facilitation_budget_index,
+    form.workforce_load_state,
+    kpiPreview?.achieved,
+    previewResult.cost_index,
+    previewResult.safety_score,
+    previewResult.schedule_index,
+  ]);
+
+  const missionHits = engagementMissions.filter((mission) => mission.done).length;
+  const progressPct = Math.round((completedStepCount / stepTitles.length) * 100);
+
+  const roundIntensity = useMemo(() => {
+    const score =
+      36 +
+      (form.bid_aggressiveness - 3) * 12 +
+      (form.risk_appetite === "Aggressive" ? 18 : form.risk_appetite === "Conservative" ? -6 : 0) +
+      (form.workforce_load_state === "Overloaded" ? 16 : form.workforce_load_state === "Underloaded" ? -4 : 0) +
+      (form.pm_utilization_target - 75) / 2 +
+      (form.compliance_posture === "High-Risk Facilitation" ? 14 : 0) +
+      (form.market_expansion === "Scale Two New Regions" ? 14 : form.market_expansion === "Pilot One New Region" ? 7 : 0);
+    return Math.round(clamp(score, 0, 100));
+  }, [
+    form.bid_aggressiveness,
+    form.compliance_posture,
+    form.market_expansion,
+    form.pm_utilization_target,
+    form.risk_appetite,
+    form.workforce_load_state,
+  ]);
+
+  const roundIntensityBand = roundIntensity >= 75 ? "High" : roundIntensity >= 50 ? "Moderate" : "Controlled";
+  const roundIntensityTone =
+    roundIntensity >= 75
+      ? "border-rose-200 bg-rose-50 text-rose-800"
+      : roundIntensity >= 50
+        ? "border-amber-200 bg-amber-50 text-amber-800"
+        : "border-emerald-200 bg-emerald-50 text-emerald-800";
+
+  const pacingHint =
+    totalStepMinutes < 12
+      ? "You are moving very fast. Consider deeper review for realism."
+      : totalStepMinutes <= 35
+        ? "Good decision pace for a 30-40 minute simulation round."
+        : "Detailed pace is strong. Prioritize lock readiness before deadline.";
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -1077,38 +1234,109 @@ export default function RoundDecisionPage() {
       }
 
       const existing = existingData as ExistingDecisionRow | null;
-            if (existing) {
-              const parsedProfile = parseDecisionProfile(existing.raw);
-      
-              setForm({
-                ...defaultForm,
-                ...parsedProfile,
-                focus_cost: existing.focus_cost,
-                focus_quality: existing.focus_quality,
-                focus_stakeholder: existing.focus_stakeholder,
-                focus_speed: existing.focus_speed,
-                risk_appetite: existing.risk_appetite,
-                governance_intensity: existing.governance_intensity,
-                buffer_percent: existing.buffer_percent,
-                vendor_strategy: existing.vendor_strategy,
-              });
-      
-              const savedStepRaw = (existing.raw as { active_step?: unknown } | null)?.active_step;
-              const savedStep =
-                typeof savedStepRaw === "number" && savedStepRaw >= 0 && savedStepRaw <= 4
-                  ? (savedStepRaw as StepIndex)
-                  : 0;
-      
-              setActiveStep(savedStep);
-              activeStepRef.current = savedStep;
-              stepStartRef.current = Date.now();
-              setLocked(Boolean(existing.locked));
-            } else {
-              setLocked(false);
-            }
-      
-            setHasUnsavedChanges(false);
-            setLoading(false);
+      if (existing) {
+        const parsedProfile = parseDecisionProfile(existing.raw);
+
+        setForm({
+          ...defaultForm,
+          ...parsedProfile,
+          focus_cost: existing.focus_cost,
+          focus_quality: existing.focus_quality,
+          focus_stakeholder: existing.focus_stakeholder,
+          focus_speed: existing.focus_speed,
+          risk_appetite: existing.risk_appetite,
+          governance_intensity: existing.governance_intensity,
+          buffer_percent: existing.buffer_percent,
+          vendor_strategy: existing.vendor_strategy,
+        });
+
+        const warRoomV2 = existing.raw?.war_room_v2 as any;
+        if (warRoomV2 && Array.isArray(warRoomV2.eventsChosen)) {
+          const initChosen: Record<string, string> = {};
+          warRoomV2.eventsChosen.forEach((ec: any) => {
+            if (ec.eventId && ec.choiceId) initChosen[ec.eventId] = ec.choiceId;
+          });
+          setEventsChosen(initChosen);
+        }
+        if (warRoomV2?.forecast) {
+          setForecast(warRoomV2.forecast);
+        }
+
+        const savedStepRaw = (existing.raw as { active_step?: unknown } | null)?.active_step;
+        const savedStep =
+          typeof savedStepRaw === "number" && savedStepRaw >= 0 && savedStepRaw <= 4
+            ? (savedStepRaw as StepIndex)
+            : 0;
+
+        setActiveStep(savedStep);
+        activeStepRef.current = savedStep;
+        stepStartRef.current = Date.now();
+        setLocked(Boolean(existing.locked));
+        setPromotionNotice("");
+        setPromotionWarning("");
+      } else {
+        setLocked(false);
+        setForm(defaultForm);
+        setPromotionNotice("");
+        setPromotionWarning("");
+
+        const { data: promotionData, error: promotionErr } = await supabase
+          .from("scenario_promotions")
+          .select("id,source_scenario_name,promotion_payload,applied_at")
+          .eq("session_id", sessionId)
+          .eq("team_id", myTeam.id)
+          .eq("user_id", user.id)
+          .eq("target_round", roundNumber)
+          .maybeSingle();
+
+        if (promotionErr) {
+          if (!isMissingTableError(promotionErr.message)) {
+            setPromotionWarning(`Could not load promoted defaults: ${promotionErr.message}`);
+          }
+        } else {
+          const promotion = promotionData as ScenarioPromotionRow | null;
+          if (promotion) {
+            const payload = toRecord(promotion.promotion_payload) ?? {};
+            const parsedPromotionProfile = parseDecisionProfile(payload);
+
+            const promotedRisk = toEnum(payload.risk_appetite, riskOptions, defaultForm.risk_appetite);
+            const promotedGovernance = toEnum(
+              payload.governance_intensity,
+              governanceOptions,
+              defaultForm.governance_intensity
+            );
+            const promotedVendor = toEnum(payload.vendor_strategy, vendorOptions, defaultForm.vendor_strategy);
+
+            setForm({
+              ...defaultForm,
+              ...parsedPromotionProfile,
+              focus_cost: parsePromotionNumber(payload.focus_cost, defaultForm.focus_cost, 0, 100),
+              focus_quality: parsePromotionNumber(payload.focus_quality, defaultForm.focus_quality, 0, 100),
+              focus_stakeholder: parsePromotionNumber(payload.focus_stakeholder, defaultForm.focus_stakeholder, 0, 100),
+              focus_speed: parsePromotionNumber(payload.focus_speed, defaultForm.focus_speed, 0, 100),
+              risk_appetite: promotedRisk,
+              governance_intensity: promotedGovernance,
+              buffer_percent: parsePromotionNumber(payload.buffer_percent, defaultForm.buffer_percent, 0, 20),
+              vendor_strategy: promotedVendor,
+            });
+
+            const label = toText(promotion.source_scenario_name, "scenario preset");
+            setPromotionNotice(`Loaded promoted defaults from \"${label}\" for FY ${roundNumber}.`);
+
+            const stamp = new Date().toISOString();
+            await supabase
+              .from("scenario_promotions")
+              .update({ applied_at: stamp, updated_at: stamp })
+              .eq("id", promotion.id)
+              .eq("user_id", user.id)
+              .eq("session_id", sessionId)
+              .eq("team_id", myTeam.id);
+          }
+        }
+      }
+
+      setHasUnsavedChanges(false);
+      setLoading(false);
     })();
   }, [roundNumber, router, sessionId, supabase]);
 
@@ -1136,6 +1364,11 @@ export default function RoundDecisionPage() {
             active_step: activeStep,
             budget,
             events: resolvedRoundEvents,
+            war_room_v2: {
+              eventsShown: deckEvents.map(e => e.id),
+              eventsChosen: Object.entries(eventsChosen).map(([eventId, choiceId]) => ({ eventId, choiceId })),
+              forecast: forecast
+            },
           },
           locked: false,
           submitted_at: null,
@@ -1176,7 +1409,7 @@ export default function RoundDecisionPage() {
       }
       if (focusSum !== 100) throw new Error(`Focus must total 100 (current: ${focusSum}).`);
 
-      const effectiveKpiTarget = await ensureTeamKpiTarget(true);
+      await ensureTeamKpiTarget(true);
 
       const core = buildCoreDecision(form);
       const currentProfile = extractProfile(form);
@@ -1209,6 +1442,11 @@ export default function RoundDecisionPage() {
             active_step: activeStep,
             budget,
             events: resolvedRoundEvents,
+            war_room_v2: {
+              eventsShown: deckEvents.map(e => e.id),
+              eventsChosen: Object.entries(eventsChosen).map(([eventId, choiceId]) => ({ eventId, choiceId })),
+              forecast: forecast
+            },
           },
           locked: true,
           submitted_at: submittedAt,
@@ -1217,126 +1455,11 @@ export default function RoundDecisionPage() {
       );
 
       if (lockErr) throw lockErr;
-
-      let prevResult: RoundResult | null = null;
-      let prevProfile: DecisionProfile | null = null;
-
-      if (roundNumber > 1) {
-        const { data: prevResultData } = await supabase
-          .from("team_results")
-          .select(
-            "schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,detail"
-          )
-          .eq("session_id", sessionId)
-          .eq("team_id", teamId)
-          .eq("round_number", roundNumber - 1)
-          .maybeSingle();
-
-        if (prevResultData) {
-          prevResult = {
-            ...(prevResultData as Omit<RoundResult, "detail">),
-            detail: (prevResultData as { detail?: Record<string, unknown> }).detail ?? {},
-          };
-        }
-
-        const { data: prevDecisionData } = await supabase
-          .from("decisions")
-          .select("raw")
-          .eq("session_id", sessionId)
-          .eq("team_id", teamId)
-          .eq("round_number", roundNumber - 1)
-          .maybeSingle();
-
-        const prevDecision = prevDecisionData as PrevDecisionRawRow | null;
-        prevProfile = parseDecisionProfile(prevDecision?.raw);
-      }
-
-      const seed = `${sessionId}:${teamId}:${roundNumber}`;
-      const result = computeRoundResultV2(core, seed, {
-        profile: currentProfile,
-        prevResult,
-        prevProfile,
-        events: resolvedRoundEvents,
+      await scoreRoundSecureClient({
+        supabase,
+        sessionId,
+        roundNumber,
       });
-
-      const kpiEval = evaluateKpiAchievement(effectiveKpiTarget, result);
-      const boostedPoints = applyKpiMultiplier(result.points_earned, kpiEval.achieved);
-
-      const latePenalty = computeLatePenalty(roundDeadlineIso, submittedAt, roundClockSource);
-            const finalPoints = Math.max(0, boostedPoints - latePenalty.pointsPenalty);
-            const finalStakeholder = clamp(result.stakeholder_score - latePenalty.stakeholderPenalty, 0, 100);
-      
-            const augmentedResult: RoundResult = {
-              ...result,
-              stakeholder_score: finalStakeholder,
-              points_earned: finalPoints,
-              penalties: (result.penalties ?? 0) + latePenalty.pointsPenalty,
-              detail: {
-                ...result.detail,
-                events: resolvedRoundEvents,
-                kpi: {
-                  target: effectiveKpiTarget,
-                  achieved: kpiEval.achieved,
-                  metric: kpiEval.metricKey,
-                  actual: kpiEval.actual,
-                  threshold: kpiEval.threshold,
-                  threshold_label: kpiEval.thresholdLabel,
-                  base_points: result.points_earned,
-                  multiplied_points: boostedPoints,
-                  late_points_penalty: latePenalty.pointsPenalty,
-                  final_points: finalPoints,
-                  multiplier: kpiEval.achieved ? 4 : 1,
-                },
-                timeliness: {
-                  clock_source: roundClockSource,
-                  deadline_at: roundDeadlineIso,
-                  submitted_at: submittedAt,
-                  minutes_late: latePenalty.minutesLate,
-                  points_penalty: latePenalty.pointsPenalty,
-                  stakeholder_penalty: latePenalty.stakeholderPenalty,
-                  extension_mode: latePenalty.extensionMode,
-                },
-              },
-            };
-
-      const { error: resultErr } = await supabase.from("team_results").upsert(
-        {
-          session_id: sessionId,
-          team_id: teamId,
-          round_number: roundNumber,
-          schedule_index: augmentedResult.schedule_index,
-          cost_index: augmentedResult.cost_index,
-          cash_closing: augmentedResult.cash_closing,
-          quality_score: augmentedResult.quality_score,
-          safety_score: augmentedResult.safety_score,
-          stakeholder_score: augmentedResult.stakeholder_score,
-          claim_entitlement_score: augmentedResult.claim_entitlement_score,
-          points_earned: augmentedResult.points_earned,
-          penalties: augmentedResult.penalties,
-          detail: augmentedResult.detail,
-        },
-        { onConflict: "session_id,team_id,round_number" }
-      );
-
-      if (resultErr) throw resultErr;
-
-      const { data: allResultsData, error: allResultsErr } = await supabase
-        .from("team_results")
-        .select("points_earned")
-        .eq("session_id", sessionId)
-        .eq("team_id", teamId);
-
-      if (allResultsErr) throw allResultsErr;
-
-      const allResults = (allResultsData ?? []) as TeamResultSummaryRow[];
-      const recomputedTotal = allResults.reduce((sum, row) => sum + (row.points_earned ?? 0), 0);
-
-      const { error: teamUpdateErr } = await supabase
-        .from("teams")
-        .update({ total_points: recomputedTotal })
-        .eq("id", teamId);
-
-      if (teamUpdateErr) throw teamUpdateErr;
 
 
       const { count: teamCountForRound } = await supabase
@@ -1507,814 +1630,392 @@ export default function RoundDecisionPage() {
     setActiveStep(candidate);
   };
 
+  const isLocked = locked || roundStatus !== "open" || lockBlockedByDeadline;
+
   return (
     <RequireAuth>
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
-        <aside className="h-fit space-y-4 lg:sticky lg:top-24">
-          <Card>
-            <CardHeader
-              title={`${fyLabel} Decision Workspace`}
-              subtitle={teamName ? `Team ${teamName}` : "Loading team..."}
-            />
-            <CardBody className="space-y-3">
-              {stepTitles.map((title, index) => {
-                const idx = index as StepIndex;
-                const current = activeStep === idx;
-                const unlocked = availableStep(idx);
-                return (
-                  <button
-                    key={title}
-                    type="button"
-                    disabled={!unlocked}
-                    onClick={() => setActiveStep(idx)}
-                    className={`w-full rounded-lg border px-3 py-2 text-left text-sm ${
-                      current
-                        ? "border-teal-400 bg-teal-50 text-teal-900"
-                        : "border-slate-200 bg-white text-slate-700"
-                    } ${unlocked ? "hover:border-teal-300" : "opacity-50"}`}
-                  >
-                    <div className="font-semibold">Step {index + 1}</div>
-                    <div className="text-xs opacity-80">{title}</div>
-                  </button>
-                );
-              })}
-
-              <div className="rounded-lg border border-slate-200 bg-white p-3 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">Readiness</span>
-                  <b>{readinessScore}%</b>
-                </div>
-                <div className="mt-2 h-2 rounded-full bg-slate-200">
-                  <div
-                    className="h-2 rounded-full bg-gradient-to-r from-amber-500 to-teal-600"
-                    style={{ width: `${readinessScore}%` }}
-                  />
-                </div>
-                <div className="mt-2 text-xs text-slate-600">Risk band: {riskLevel}</div>
+      <div className="flex flex-col min-h-[100dvh] pb-32 bg-[#020617] text-slate-300">
+        {/* HEADER ZONE */}
+        <header className="sticky top-[60px] z-40 bg-slate-950/80 backdrop-blur-md border-b border-white/5 px-4 py-3 shadow-lg">
+          <div className="max-w-[1180px] mx-auto flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="flex items-center gap-3">
+                <Link className="text-slate-400 hover:text-white" href={`/sessions/${sessionId}`}>
+                  <svg className="w-5 h-5 block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+                </Link>
+                <h1 className="text-lg font-black text-white uppercase tracking-tight">Round {roundNumber} War Room</h1>
+                {isLocked ? (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold tracking-widest bg-rose-500/20 text-rose-400 border border-rose-500/30">LOCKED</span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold tracking-widest bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">DRAFTING</span>
+                )}
               </div>
-
-              <div
-                className={`rounded-lg border px-3 py-2 text-xs ${
-                  lockWindowExpired
-                    ? "border-amber-200 bg-amber-50 text-amber-800"
-                    : "border-cyan-200 bg-cyan-50 text-cyan-900"
-                }`}
-              >
-                <div className="font-semibold">Round lock clock</div>
-                <div className="mt-1">
-                  {locked
-                    ? "Round already locked"
-                    : msLeft === null
-                      ? "Initializing..."
-                      : lockWindowExpired
-                        ? "Deadline reached. Waiting for facilitator auto-lock."
-                        : `Time left: ${formatClock(msLeft)}`}
-                </div>
-                <div className="mt-1 text-[11px]">
-                  Teams locked: {lockedTeamsCount}/{totalTeamsCount || "-"} | Round status: {roundStatus}
-                </div>
-                <div className="mt-1 text-[11px]">Clock source: {roundClockSource === "shared" ? "session_rounds" : "local fallback"}</div>
-                <div className="mt-1 text-[11px]">{submissionPressure.message}</div>
-                <div className="mt-1 text-[11px]">Projected points if locked now: {submissionPressure.projectedPointsAfterPenalty}</div>
-                <div className="mt-1 text-[11px]">Current step effort: {currentStepMinutes}m | Draft: {hasUnsavedChanges ? "Unsaved" : "Saved"}</div>
+              <div className="mt-1 flex items-center gap-3 text-[10px] text-slate-500 uppercase tracking-widest font-semibold ml-8">
+                <span>{teamName}</span>
+                <span>•</span>
+                <span>Readiness: {readinessScore}%</span>
               </div>
+            </div>
+            <div className="flex flex-col items-end">
+              <span className="text-slate-500 uppercase tracking-widest text-[9px]">Clock Source: {roundClockSource}</span>
+              <span className={`font-bold text-lg font-mono leading-none ${lockWindowExpired ? "text-rose-400" : "text-emerald-400"}`}>
+                {msLeft === null ? "--:--" : formatClock(msLeft)}
+              </span>
+            </div>
+          </div>
+        </header>
 
-              <Link className="inline-flex text-sm underline text-slate-700" href={`/sessions/${sessionId}`}>
-                Back to Session
-              </Link>
-              <Link className="inline-flex text-sm underline text-slate-700" href={`/sessions/${sessionId}/report`}>
-                Open FY Report
-              </Link>
-            </CardBody>
-          </Card>
-
-          <Card>
-                        <CardHeader title="Budget Pressure" subtitle="Live impact of selected decisions" />
-            <CardBody className="space-y-3">
-              <BudgetBar label="People & L&D" value={budget.people_l_and_d} max={biggestBudget} />
-              <BudgetBar label="Engineering Quality" value={budget.engineering_quality} max={biggestBudget} />
-              <BudgetBar label="Ops Resilience" value={budget.operations_resilience} max={biggestBudget} />
-              <BudgetBar label="Subcontracting & Partners" value={budget.subcontracting_and_partnering} max={biggestBudget} />
-              <BudgetBar label="Assets & Specialized Capability" value={budget.asset_and_specialization} max={biggestBudget} />
-              <BudgetBar label="Compliance + CSR" value={budget.compliance_and_sustainability} max={biggestBudget} />
-              <BudgetBar label="Stakeholder Visibility" value={budget.stakeholder_visibility} max={biggestBudget} />
-              <BudgetBar label="Risk Contingency" value={budget.risk_contingency} max={biggestBudget} />
-              <BudgetBar label="Financing Pressure" value={budget.financing_cost_pressure} max={biggestBudget} />
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
-                Total budget pressure: Rs {Math.round(budget.total_budget_pressure / 1000)}k
-              </div>
-            </CardBody>
-          </Card>
-
-          <Card>
-            <CardHeader title="Projected Outcome" subtitle="Deterministic preview before locking" />
-            <CardBody className="space-y-3">
-              <ProjectionBar label="SPI" value={previewResult.schedule_index} min={0.64} max={1.28} />
-              <ProjectionBar label="CPI" value={previewResult.cost_index} min={0.62} max={1.27} />
-              <ProjectionBar label="Quality" value={previewResult.quality_score} min={0} max={100} />
-              <ProjectionBar label="Safety" value={previewResult.safety_score} min={0} max={100} />
-              <ProjectionBar label="Stakeholder" value={previewResult.stakeholder_score} min={0} max={100} />
-              <ProjectionBar label="Points" value={previewResult.points_earned} min={0} max={700} />
-            </CardBody>
-          </Card>
-        </aside>
-
-        <div className="space-y-4">
-          {error ? (
-            <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+        {/* MAIN ZONE */}
+        <main className="w-full max-w-[1180px] mx-auto p-4 md:p-6 space-y-6">
+          {error && (
+            <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-400 shadow-inner">
               {error}
             </div>
-          ) : null}
-
+          )}
           {loading ? (
-            <Card>
-              <CardBody>
-                <p className="text-sm text-slate-600">Loading round setup...</p>
-              </CardBody>
-            </Card>
+             <div className="animate-pulse flex flex-col gap-4">
+               <div className="h-10 w-48 bg-slate-800 rounded-lg" />
+               <div className="h-64 rounded-xl bg-slate-900/50 border border-white/5" />
+             </div>
           ) : (
-            <>
-              {activeStep === 0 ? (
-                <Card>
-                  <CardHeader title="Step 1 - Context & Strategy" subtitle="Read the round shocks, set posture, and assign strategic focus." />
-                  <CardBody className="space-y-5">
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                      <div className="text-sm font-semibold text-slate-900">Team KPI Target (4x points when achieved)</div>
-                      {teamKpiTarget ? (
-                        <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-                          Locked KPI target: <b>{teamKpiTarget}</b>
+             <>
+                <RoundBriefingCard sessionId={sessionId} roundNumber={roundNumber} teamId={teamId} />
+                <div className="grid grid-cols-1 lg:grid-cols-[1fr_minmax(0,340px)] gap-6">
+                <div className="space-y-6">
+                   {/* TAB BAR */}
+                   <div className="overflow-x-auto pb-2 scrollbar-hide">
+                     <div className="flex gap-2 min-w-max">
+                       {stepTitles.map((title, index) => {
+                         const idx = index as StepIndex;
+                         const current = activeStep === idx;
+                         const unlocked = availableStep(idx);
+                         return (
+                           <button
+                             key={title}
+                             onClick={() => setActiveStep(idx)}
+                             disabled={!unlocked}
+                             className={`px-5 py-2.5 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-all ${
+                               current ? "bg-blue-600 text-white shadow-lg shadow-blue-500/20 border border-white/10" : "bg-slate-900/50 text-slate-400 border border-transparent hover:bg-slate-800"
+                             } ${!unlocked && "opacity-30 cursor-not-allowed"}`}
+                           >
+                             {String(index+1).padStart(2,"0")} <span className="opacity-50 mx-1">/</span> {title}
+                           </button>
+                         );
+                       })}
+                     </div>
+                   </div>
+
+                   {/* TAB CONTENT: STEP 1 */}
+                   {activeStep === 0 && (
+                     <div className="space-y-6 animate-in fade-in duration-300">
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Team KPI Target (4x points)</div>
+                          {teamKpiTarget ? (
+                            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-400 font-bold shadow-inner flex justify-between items-center">
+                              <span>LOCKED TARGET // {teamKpiTarget}</span>
+                              {savingKpiTarget && <span className="text-emerald-400 animate-pulse text-xs">SAVING...</span>}
+                            </div>
+                          ) : roundNumber === 1 ? (
+                            <div className="space-y-4">
+                              <SegmentedControl options={KPI_TARGET_OPTIONS.map(k=>({value:k.value,text:k.value,hint:k.thresholdLabel}))} activeOption={draftKpiTarget} onSelect={(value) => setDraftKpiTarget(value)} disabled={isLocked} />
+                              <div className="pt-2"><Button variant="secondary" onClick={saveKpiTargetNow} disabled={isLocked || !draftKpiTarget || savingKpiTarget}>{savingKpiTarget ? "SAVING..." : "LOCK KPI TARGET"}</Button></div>
+                            </div>
+                          ) : (
+                            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400 shadow-inner">KPI TARGET NOT SET IN R1</div>
+                          )}
                         </div>
-                      ) : roundNumber === 1 ? (
-                        <>
-                          <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                            {KPI_TARGET_OPTIONS.map((kpi) => (
-                              <StepTile
-                                key={kpi.value}
-                                active={draftKpiTarget === kpi.value}
-                                icon={kpi.short}
-                                title={kpi.value}
-                                description={`${kpi.description} | ${kpi.thresholdLabel}`}
-                                disabled={formReadOnly}
-                                onClick={() => setDraftKpiTarget(kpi.value)}
-                              />
-                            ))}
-                          </div>
-                          <div className="mt-2">
-                            <Button
-                              variant="secondary"
-                              onClick={saveKpiTargetNow}
-                              disabled={formReadOnly || !draftKpiTarget || savingKpiTarget}
-                            >
-                              {savingKpiTarget ? "Saving KPI..." : "Save Team KPI Target"}
-                            </Button>
-                          </div>
-                        </>
-                      ) : (
-                        <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                          KPI target was not set in Round 1. Ask facilitator to reset this session if you want KPI scoring.
-                        </div>
-                      )}
-                    </div>
-                    <div>
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-sm font-semibold text-slate-900">Round news (Indian construction context)</div>
-                        <Link className="text-xs underline text-slate-700" href={`/sessions/${sessionId}/round/${roundNumber}/news`}>
-                          Open News Desk
-                        </Link>
-                      </div>
-                      <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
-                        {resolvedRoundEvents.map((event: ConstructionEvent) => (
-                          <div
-                            key={event.id}
-                            className="rounded-lg border border-slate-200 bg-white p-3 text-sm"
-                          >
-                            <img src={getNewsImageUrl(event)} alt={event.title} className="h-28 w-full rounded-md object-cover" loading="lazy" />
-                            <div className="mt-2 font-semibold text-slate-900">{event.title}</div>
-                            <div className="mt-1 text-xs text-slate-600">{event.description}</div>
-                            <div className="mt-2 text-xs text-slate-500">
-                              Severity: {event.severity} | {event.tags.join(", ")}
+
+                        {deckEvents.length > 0 && (
+                          <div className="p-5 rounded-2xl bg-slate-900/40 border border-teal-500/30 space-y-4">
+                            <div className="text-[10px] font-bold uppercase tracking-widest text-teal-500 flex items-center justify-between">
+                              <span>Event Deck (Action Required)</span>
+                              <span className="text-teal-400/50">{Object.keys(eventsChosen).length}/{deckEvents.length} Decided</span>
+                            </div>
+                            <div className="space-y-6">
+                              {deckEvents.map(evt => (
+                                <div key={evt.id} className="space-y-3 p-4 rounded-xl bg-slate-950/50 border border-slate-800">
+                                  <div>
+                                    <div className="font-bold text-slate-200">{evt.title}</div>
+                                    <div className="text-xs text-slate-400 mt-1 leading-relaxed">{evt.description}</div>
+                                  </div>
+                                  <div className="pt-2">
+                                    <SegmentedControl
+                                      options={evt.choices.map(c => ({ value: c.id, text: c.label, hint: c.theoryHint }))}
+                                      activeOption={eventsChosen[evt.id] || ""}
+                                      onSelect={(v) => updateEventChoice(evt.id, v)}
+                                      disabled={isLocked}
+                                    />
+                                  </div>
+                                </div>
+                              ))}
                             </div>
                           </div>
-                        ))}
-                      </div>
-                    </div>
+                        )}
 
-                    <div>
-                      <div className="text-sm font-semibold text-slate-900">External context tiles</div>
-                      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                        {externalContextOptions.map((option) => (
-                          <StepTile
-                            key={option.value}
-                            active={form.external_context === option.value}
-                            icon={option.icon}
-                            title={option.text}
-                            description="Influences round volatility and execution constraints."
-                            disabled={formReadOnly}
-                            emoji={externalContextVisuals[option.value].emoji}
-                            visualClass={externalContextVisuals[option.value].visualClass}
-                            onClick={() => update("external_context", option.value)}
-                          />
-                        ))}
-                      </div>
-                    </div>
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Live External Context</div>
+                          <SegmentedControl options={externalContextOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.external_context} onSelect={(v)=>update("external_context",v)} disabled={isLocked} />
+                        </div>
 
-                    <div>
-                      <div className="text-sm font-semibold text-slate-900">Strategic posture tiles</div>
-                      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                        {postureOptions.map((option) => (
-                          <StepTile
-                            key={option.value}
-                            active={form.strategic_posture === option.value}
-                            icon={option.icon}
-                            title={option.text}
-                            description="Affects alignment bonus in scoring."
-                            disabled={formReadOnly}
-                            emoji={postureVisuals[option.value].emoji}
-                            visualClass={postureVisuals[option.value].visualClass}
-                            onClick={() => update("strategic_posture", option.value)}
-                          />
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                      <FocusSlider
-                        label="Cost focus"
-                        value={form.focus_cost}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("focus_cost", v)}
-                      />
-                      <FocusSlider
-                        label="Quality focus"
-                        value={form.focus_quality}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("focus_quality", v)}
-                      />
-                      <FocusSlider
-                        label="Stakeholder focus"
-                        value={form.focus_stakeholder}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("focus_stakeholder", v)}
-                      />
-                      <FocusSlider
-                        label="Speed focus"
-                        value={form.focus_speed}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("focus_speed", v)}
-                      />
-                    </div>
-
-                    <div className={`rounded-lg px-3 py-2 text-sm ${focusSum === 100 ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
-                      Focus total: {focusSum} {focusSum === 100 ? "(valid)" : "(must be 100)"}
-                    </div>
-                  </CardBody>
-                </Card>
-              ) : null}
-
-              {activeStep === 1 ? (
-                <Card>
-                                    <CardHeader title="Step 2 - Market & Governance" subtitle="Choose entry sectors and bidding posture for your EPC portfolio." />
-                  <CardBody className="space-y-5">
-                    <div>
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-sm font-semibold text-slate-900">Primary sector entry</div>
-                        <div className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">{fyLabel} specialization</div>
-                      </div>
-                      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                        {sectorOptions.map((option) => (
-                          <StepTile
-                            key={option.value}
-                            active={form.primary_sector === option.value}
-                            icon={option.icon}
-                            title={option.text}
-                            description="Sets base complexity, quality expectations, and sector shocks."
-                            imageUrl={sectorVisuals[option.value].image}
-                            disabled={formReadOnly}
-                            onClick={() => update("primary_sector", option.value)}
-                          />
-                        ))}
-                      </div>
-
-                      <div className="mt-3 overflow-hidden rounded-xl border border-slate-200 bg-white">
-                        <img
-                          src={selectedSectorMeta.image}
-                          alt={form.primary_sector}
-                          className="h-40 w-full object-cover"
-                          loading="lazy"
-                        />
-                        <div className="grid grid-cols-1 gap-2 p-3 text-sm md:grid-cols-3">
-                          <div>
-                            <div className="text-xs uppercase tracking-wide text-slate-500">Sector</div>
-                            <div className="mt-1 font-semibold text-slate-900">{form.primary_sector}</div>
-                            <div className="mt-1 text-xs text-slate-600">{selectedSectorMeta.headline}</div>
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="flex items-center justify-between">
+                            <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Focus Allocation</div>
+                            <div className={`text-[10px] font-mono font-bold ${focusSum===100?"text-emerald-400":"text-rose-400"}`}>TOTAL: {focusSum}/100</div>
                           </div>
-                          <div>
-                            <div className="text-xs uppercase tracking-wide text-slate-500">Execution challenge</div>
-                            <div className="mt-1 text-xs text-slate-700">{selectedSectorMeta.challenge}</div>
-                          </div>
-                          <div>
-                            <div className="text-xs uppercase tracking-wide text-slate-500">Quality expectation</div>
-                            <div className="mt-1 text-xs text-slate-700">{selectedSectorMeta.quality_expectation}</div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <DecisionSlider label="Cost Focus" value={form.focus_cost} min={0} max={100} onChange={v=>update("focus_cost",v)} disabled={isLocked} />
+                            <DecisionSlider label="Quality Focus" value={form.focus_quality} min={0} max={100} onChange={v=>update("focus_quality",v)} disabled={isLocked} />
+                            <DecisionSlider label="Stakeholder Focus" value={form.focus_stakeholder} min={0} max={100} onChange={v=>update("focus_stakeholder",v)} disabled={isLocked} />
+                            <DecisionSlider label="Speed Focus" value={form.focus_speed} min={0} max={100} onChange={v=>update("focus_speed",v)} disabled={isLocked} />
                           </div>
                         </div>
-                      </div>
-                    </div>
+                        
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Strategic Posture</div>
+                          <SegmentedControl options={postureOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.strategic_posture} onSelect={(v)=>update("strategic_posture",v)} disabled={isLocked} />
+                        </div>
+                     </div>
+                   )}
 
-                    <label className="text-sm">
-                      Secondary sector entry
-                      <select
-                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                        value={form.secondary_sector}
-                        disabled={formReadOnly}
-                        onChange={(e) => update("secondary_sector", e.target.value as SecondarySector)}
-                      >
-                        {secondarySectorOptions.map((option) => (
-                          <option key={option} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                      {expansionOptions.map((option) => (
-                        <StepTile
-                          key={option.value}
-                          active={form.market_expansion === option.value}
-                          icon={option.icon}
-                          title={option.text}
-                          description="Controls growth speed vs complexity."
-                          disabled={formReadOnly}
-                          onClick={() => update("market_expansion", option.value)}
-                        />
-                      ))}
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                      <SliderField
-                        label="Bid aggressiveness"
-                        value={form.bid_aggressiveness}
-                        min={1}
-                        max={5}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("bid_aggressiveness", v)}
-                      />
-                      <SliderField
-                        label="Public project mix"
-                        value={form.project_mix_public_pct}
-                        min={0}
-                        max={100}
-                        suffix="%"
-                        disabled={formReadOnly}
-                        onChange={(v) => update("project_mix_public_pct", v)}
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                      <label className="text-sm">
-                        Risk appetite
-                        <select
-                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                          value={form.risk_appetite}
-                          disabled={formReadOnly}
-                          onChange={(e) => update("risk_appetite", e.target.value as RiskAppetite)}
-                        >
-                          {riskOptions.map((option) => (
-                            <option key={option} value={option}>
-                              {option}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label className="text-sm">
-                        Governance intensity
-                        <select
-                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                          value={form.governance_intensity}
-                          disabled={formReadOnly}
-                          onChange={(e) => update("governance_intensity", e.target.value as Governance)}
-                        >
-                          {governanceOptions.map((option) => (
-                            <option key={option} value={option}>
-                              {option}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label className="text-sm">
-                        Message tone
-                        <select
-                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                          value={form.public_message_tone}
-                          disabled={formReadOnly}
-                          onChange={(e) => update("public_message_tone", e.target.value as MessageTone)}
-                        >
-                          {messageToneOptions.map((option) => (
-                            <option key={option} value={option}>
-                              {option}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    </div>
-                  </CardBody>
-                </Card>
-              ) : null}
-
-              {activeStep === 2 ? (
-                <Card>
-                                    <CardHeader title="Step 3 - Delivery Mix, People & Assets" subtitle="Choose self-perform vs subcontracting, workforce loading, and specialized capability." />
-                  <CardBody className="space-y-5">
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                      <SliderField
-                        label="Self-perform share"
-                        value={form.self_perform_percent}
-                        min={0}
-                        max={100}
-                        suffix="%"
-                        disabled={formReadOnly}
-                        onChange={(v) => update("self_perform_percent", v)}
-                      />
-                      <SliderField
-                        label="P&M utilization target"
-                        value={form.pm_utilization_target}
-                        min={40}
-                        max={95}
-                        suffix="%"
-                        disabled={formReadOnly}
-                        onChange={(v) => update("pm_utilization_target", v)}
-                      />
-                      <SliderField
-                        label="Specialized work capability"
-                        value={form.specialized_work_index}
-                        min={0}
-                        max={100}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("specialized_work_index", v)}
-                      />
-                      <SliderField
-                        label="Work-life balance index"
-                        value={form.work_life_balance_index}
-                        min={0}
-                        max={100}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("work_life_balance_index", v)}
-                      />
-                    </div>
-
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="text-sm font-semibold text-slate-900">Make vs Buy Simulator</div>
-                        <div className="text-xs text-slate-600">Self {form.self_perform_percent}% | Subcontract {subcontractShare}%</div>
-                      </div>
-
-                      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-                        <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-700">
-                          <div className="font-semibold text-slate-900">In-house delivery</div>
-                          <div className="mt-1">Estimated cost index: {makeVsBuySnapshot.inHouseCostIndex.toFixed(2)}</div>
-                          <div className="mt-1">Execution risk: {makeVsBuySnapshot.executionRisk}</div>
-                          <div className="mt-2 h-2 rounded-full bg-slate-200">
-                            <div className="h-2 rounded-full bg-gradient-to-r from-cyan-500 to-teal-600" style={{ width: `${Math.round(form.self_perform_percent)}%` }} />
+                   {/* TAB CONTENT: STEP 2 */}
+                   {activeStep === 1 && (
+                     <div className="space-y-6 animate-in fade-in duration-300">
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Sector Selection</div>
+                          <SegmentedControl options={sectorOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.primary_sector} onSelect={(v)=>update("primary_sector",v)} disabled={isLocked} />
+                          <div className="mt-4 flex flex-col bg-slate-950/50 rounded-xl p-4 border border-white/5">
+                            <span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Secondary Sector</span>
+                            <select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm font-semibold text-white focus:border-blue-500 outline-none" value={form.secondary_sector} disabled={isLocked} onChange={e=>update("secondary_sector",e.target.value as SecondarySector)}>
+                               {secondarySectorOptions.map(o=><option key={o} value={o}>{o}</option>)}
+                            </select>
                           </div>
                         </div>
 
-                        <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-700">
-                          <div className="font-semibold text-slate-900">Subcontract delivery</div>
-                          <div className="mt-1">Estimated cost index: {makeVsBuySnapshot.subcontractCostIndex.toFixed(2)}</div>
-                          <div className="mt-1">Quality confidence: {makeVsBuySnapshot.qualityConfidence}</div>
-                          <div className="mt-2 h-2 rounded-full bg-slate-200">
-                            <div className="h-2 rounded-full bg-gradient-to-r from-indigo-500 to-violet-600" style={{ width: `${Math.round(subcontractShare)}%` }} />
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Market Expansion</div>
+                          <SegmentedControl options={expansionOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.market_expansion} onSelect={(v)=>update("market_expansion",v)} disabled={isLocked} />
+                        </div>
+
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Portfolio Posture</div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <DecisionSlider label="Bid Aggressiveness" value={form.bid_aggressiveness} min={1} max={5} onChange={v=>update("bid_aggressiveness",v)} disabled={isLocked} />
+                            <DecisionSlider label="Public Project Mix" value={form.project_mix_public_pct} min={0} max={100} suffix="%" onChange={v=>update("project_mix_public_pct",v)} disabled={isLocked} />
                           </div>
                         </div>
-                      </div>
 
-                      <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                        Higher Tier-1 subcontracting improves quality confidence but increases cost pressure. Tier-3 can improve short-term speed but raises governance and quality risk.
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="text-sm font-semibold text-slate-900">Subcontractor profile</div>
-                      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                        {subcontractorOptions.map((option) => (
-                          <StepTile
-                            key={option.value}
-                            active={form.subcontractor_profile === option.value}
-                            icon={option.icon}
-                            title={option.text}
-                            description={option.hint}
-                            disabled={formReadOnly}
-                            onClick={() => update("subcontractor_profile", option.value)}
-                          />
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                      {workforceOptions.map((option) => (
-                        <StepTile
-                          key={option.value}
-                          active={form.workforce_plan === option.value}
-                          icon={option.icon}
-                          title={option.text}
-                          description="Core staffing capacity for execution."
-                          disabled={formReadOnly}
-                          onClick={() => update("workforce_plan", option.value)}
-                        />
-                      ))}
-                    </div>
-
-                    <label className="text-sm">
-                      Workforce load state
-                      <select
-                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                        value={form.workforce_load_state}
-                        disabled={formReadOnly}
-                        onChange={(e) => update("workforce_load_state", e.target.value as WorkforceLoadState)}
-                      >
-                        {workloadOptions.map((option) => (
-                          <option key={option} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                      {overtimeOptions.map((option) => (
-                        <StepTile
-                          key={option.value}
-                          active={form.overtime_policy === option.value}
-                          icon={option.icon}
-                          title={option.text}
-                          description="High intensity may hurt safety and quality."
-                          disabled={formReadOnly}
-                          onClick={() => update("overtime_policy", option.value)}
-                        />
-                      ))}
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                      <SliderField
-                        label="Training intensity"
-                        value={form.training_intensity}
-                        min={0}
-                        max={100}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("training_intensity", v)}
-                      />
-                      <SliderField
-                        label="Innovation budget index"
-                        value={form.innovation_budget_index}
-                        min={0}
-                        max={100}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("innovation_budget_index", v)}
-                      />
-                    </div>
-
-                    <label className="text-sm">
-                      QA audit frequency
-                      <select
-                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                        value={form.qa_audit_frequency}
-                        disabled={formReadOnly}
-                        onChange={(e) => update("qa_audit_frequency", e.target.value as QaFrequency)}
-                      >
-                        {qaOptions.map((option) => (
-                          <option key={option} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </CardBody>
-                </Card>
-              ) : null}
-
-              {activeStep === 3 ? (
-                <Card>
-                                    <CardHeader title="Step 4 - Ops, Compliance & Stakeholder" subtitle="Balance procurement resilience, governance exposure, CSR, and public trust." />
-                  <CardBody className="space-y-5">
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                      {logisticsOptions.map((option) => (
-                        <StepTile
-                          key={option.value}
-                          active={form.logistics_resilience === option.value}
-                          icon={option.icon}
-                          title={option.text}
-                          description="Changes monsoon and logistics shock resilience."
-                          disabled={formReadOnly}
-                          onClick={() => update("logistics_resilience", option.value)}
-                        />
-                      ))}
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                      <SliderField
-                        label="Buffer"
-                        value={form.buffer_percent}
-                        min={0}
-                        max={15}
-                        suffix="%"
-                        disabled={formReadOnly}
-                        onChange={(v) => update("buffer_percent", v)}
-                      />
-                      <SliderField
-                        label="Inventory cover"
-                        value={form.inventory_cover_weeks}
-                        min={1}
-                        max={12}
-                        suffix="w"
-                        disabled={formReadOnly}
-                        onChange={(v) => update("inventory_cover_weeks", v)}
-                      />
-                      <SliderField
-                        label="Community engagement"
-                        value={form.community_engagement}
-                        min={0}
-                        max={100}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("community_engagement", v)}
-                      />
-                      <SliderField
-                        label="Digital visibility spend"
-                        value={form.digital_visibility_spend}
-                        min={0}
-                        max={100}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("digital_visibility_spend", v)}
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                      <SliderField
-                        label="CSR & sustainability"
-                        value={form.csr_sustainability_index}
-                        min={0}
-                        max={100}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("csr_sustainability_index", v)}
-                      />
-                      <SliderField
-                        label="Facilitation risk budget"
-                        value={form.facilitation_budget_index}
-                        min={0}
-                        max={100}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("facilitation_budget_index", v)}
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                      <label className="text-sm">
-                        Compliance posture
-                        <select
-                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                          value={form.compliance_posture}
-                          disabled={formReadOnly}
-                          onChange={(e) => update("compliance_posture", e.target.value as CompliancePosture)}
-                        >
-                          {complianceOptions.map((option) => (
-                            <option key={option} value={option}>
-                              {option}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label className="text-sm">
-                        Vendor strategy
-                        <select
-                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                          value={form.vendor_strategy}
-                          disabled={formReadOnly}
-                          onChange={(e) => update("vendor_strategy", e.target.value as VendorStrategy)}
-                        >
-                          {vendorOptions.map((option) => (
-                            <option key={option} value={option}>
-                              {option}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <div>
-                        <div className="text-sm font-semibold text-slate-700">Transparency mode</div>
-                        <div className="mt-2 grid grid-cols-1 gap-2">
-                          {transparencyOptions.map((option) => (
-                            <StepTile
-                              key={option.value}
-                              active={form.transparency_level === option.value}
-                              icon={option.icon}
-                              title={option.text}
-                              description="Impacts stakeholder trust and claim defensibility."
-                              disabled={formReadOnly}
-                              onClick={() => update("transparency_level", option.value)}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  </CardBody>
-                </Card>
-              ) : null}
-
-              {activeStep === 4 ? (
-                <Card>
-                  <CardHeader title="Step 5 - Finance & Lock" subtitle="Set liquidity safeguards, review checks, then submit." />
-                  <CardBody className="space-y-5">
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                      {financingOptions.map((option) => (
-                        <StepTile
-                          key={option.value}
-                          active={form.financing_posture === option.value}
-                          icon={option.icon}
-                          title={option.text}
-                          description="Cash vs growth debt tradeoff."
-                          disabled={formReadOnly}
-                          onClick={() => update("financing_posture", option.value)}
-                        />
-                      ))}
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                      <SliderField
-                        label="Cash buffer months"
-                        value={form.cash_buffer_months}
-                        min={1}
-                        max={12}
-                        disabled={formReadOnly}
-                        onChange={(v) => update("cash_buffer_months", v)}
-                      />
-
-                      <SliderField
-                        label="Contingency fund"
-                        value={form.contingency_fund_percent}
-                        min={0}
-                        max={20}
-                        suffix="%"
-                        disabled={formReadOnly}
-                        onChange={(v) => update("contingency_fund_percent", v)}
-                      />
-                    </div>
-
-                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                      <div className="text-sm font-semibold text-slate-900">Readiness checks</div>
-                      <div className="mt-2 space-y-1">
-                        {readinessChecks.map((check) => (
-                          <div key={check.label} className="text-sm">
-                            <span className={check.pass ? "text-emerald-700" : "text-amber-700"}>
-                              {check.pass ? "OK" : "!"}
-                            </span>{" "}
-                            <span className="text-slate-700">{check.label}</span>
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Governance & Risk</div>
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Risk Appetite</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.risk_appetite} disabled={isLocked} onChange={e=>update("risk_appetite",e.target.value as RiskAppetite)}>{riskOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                            <div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Gov Intensity</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.governance_intensity} disabled={isLocked} onChange={e=>update("governance_intensity",e.target.value as Governance)}>{governanceOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                            <div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Message Tone</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.public_message_tone} disabled={isLocked} onChange={e=>update("public_message_tone",e.target.value as MessageTone)}>{messageToneOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
                           </div>
-                        ))}
-                      </div>
-                    </div>
+                        </div>
+                     </div>
+                   )}
 
-                    <div className="rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">
-                      Round readiness: <b>{readinessScore}%</b> | Session rounds: {sessionRoundCount || "-"}
-                    </div>
-                  </CardBody>
-                </Card>
-              ) : null}
+                   {/* TAB CONTENT: STEP 3 */}
+                   {activeStep === 2 && (
+                     <div className="space-y-6 animate-in fade-in duration-300">
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Delivery Mix & Assets</div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <DecisionSlider label="Self-Perform Share" value={form.self_perform_percent} min={0} max={100} suffix="%" onChange={v=>update("self_perform_percent",v)} disabled={isLocked} />
+                            <DecisionSlider label="P&M Utilization Target" value={form.pm_utilization_target} min={40} max={95} suffix="%" onChange={v=>update("pm_utilization_target",v)} disabled={isLocked} />
+                            <DecisionSlider label="Specialized Capability" value={form.specialized_work_index} min={0} max={100} onChange={v=>update("specialized_work_index",v)} disabled={isLocked} />
+                            <DecisionSlider label="Work-Life Balance" value={form.work_life_balance_index} min={0} max={100} onChange={v=>update("work_life_balance_index",v)} disabled={isLocked} />
+                          </div>
+                        </div>
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Subcontractor Profile</div>
+                          <SegmentedControl options={subcontractorOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.subcontractor_profile} onSelect={(v)=>update("subcontractor_profile",v)} disabled={isLocked} />
+                        </div>
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Workforce Dynamics</div>
+                          <SegmentedControl options={workforceOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.workforce_plan} onSelect={(v)=>update("workforce_plan",v)} disabled={isLocked} />
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                            <div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Load State</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm text-white font-semibold outline-none" value={form.workforce_load_state} disabled={isLocked} onChange={e=>update("workforce_load_state",e.target.value as WorkforceLoadState)}>{workloadOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                            <div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">QA Frequency</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm text-white font-semibold outline-none" value={form.qa_audit_frequency} disabled={isLocked} onChange={e=>update("qa_audit_frequency",e.target.value as QaFrequency)}>{qaOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                          </div>
+                        </div>
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Overtime Policy</div>
+                          <SegmentedControl options={overtimeOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.overtime_policy} onSelect={(v)=>update("overtime_policy",v)} disabled={isLocked} />
+                        </div>
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">L&D and Innovation</div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <DecisionSlider label="Training Intensity" value={form.training_intensity} min={0} max={100} onChange={v=>update("training_intensity",v)} disabled={isLocked} />
+                            <DecisionSlider label="Innovation Budget" value={form.innovation_budget_index} min={0} max={100} onChange={v=>update("innovation_budget_index",v)} disabled={isLocked} />
+                          </div>
+                        </div>
+                     </div>
+                   )}
 
-              <Card>
-                <CardBody className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex gap-2">
-                    <Button variant="secondary" onClick={prevStep} disabled={activeStep === 0 || formReadOnly}>
-                      Previous
-                    </Button>
-                    <Button onClick={nextStep} disabled={activeStep === 4 || !stepValidations[activeStep] || formReadOnly}>
-                      Next
-                    </Button>
+                   {/* TAB CONTENT: STEP 4 */}
+                   {activeStep === 3 && (
+                     <div className="space-y-6 animate-in fade-in duration-300">
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Logistics & Buffer</div>
+                          <SegmentedControl options={logisticsOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.logistics_resilience} onSelect={(v)=>update("logistics_resilience",v)} disabled={isLocked} />
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                            <DecisionSlider label="Buffer" value={form.buffer_percent} min={0} max={15} suffix="%" onChange={v=>update("buffer_percent",v)} disabled={isLocked} />
+                            <DecisionSlider label="Inventory Cover" value={form.inventory_cover_weeks} min={1} max={12} suffix="w" onChange={v=>update("inventory_cover_weeks",v)} disabled={isLocked} />
+                          </div>
+                        </div>
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Stakeholder Engagement</div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <DecisionSlider label="Community Engagement" value={form.community_engagement} min={0} max={100} onChange={v=>update("community_engagement",v)} disabled={isLocked} />
+                            <DecisionSlider label="Digital Visibility Spend" value={form.digital_visibility_spend} min={0} max={100} onChange={v=>update("digital_visibility_spend",v)} disabled={isLocked} />
+                            <DecisionSlider label="CSR & Sustainability" value={form.csr_sustainability_index} min={0} max={100} onChange={v=>update("csr_sustainability_index",v)} disabled={isLocked} />
+                            <DecisionSlider label="Facilitation Risk Budget" value={form.facilitation_budget_index} min={0} max={100} onChange={v=>update("facilitation_budget_index",v)} disabled={isLocked} />
+                          </div>
+                        </div>
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Compliance & Transparency</div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                             <div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Compliance Posture</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.compliance_posture} disabled={isLocked} onChange={e=>update("compliance_posture",e.target.value as CompliancePosture)}>{complianceOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                             <div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Vendor Strategy</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.vendor_strategy} disabled={isLocked} onChange={e=>update("vendor_strategy",e.target.value as VendorStrategy)}>{vendorOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                             <div className="flex flex-col lg:col-span-1 md:col-span-2"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Transparency Mode</span><SegmentedControl options={transparencyOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.transparency_level} onSelect={(v)=>update("transparency_level",v)} disabled={isLocked} /></div>
+                          </div>
+                        </div>
+                     </div>
+                   )}
+
+                   {/* TAB CONTENT: STEP 5 */}
+                   {activeStep === 4 && (
+                     <div className="space-y-6 animate-in fade-in duration-300">
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Financing Strategy</div>
+                           <SegmentedControl options={financingOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.financing_posture} onSelect={(v)=>update("financing_posture",v)} disabled={isLocked} />
+                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                             <DecisionSlider label="Cash Buffer" value={form.cash_buffer_months} min={1} max={12} suffix="m" onChange={v=>update("cash_buffer_months",v)} disabled={isLocked} />
+                             <DecisionSlider label="Contingency Fund" value={form.contingency_fund_percent} min={0} max={20} suffix="%" onChange={v=>update("contingency_fund_percent",v)} disabled={isLocked} />
+                           </div>
+                        </div>
+                        <div className="p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-4">
+                           <div className="text-[10px] font-bold uppercase tracking-widest text-amber-500">Deterministic Preview</div>
+                           <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+                             <div className="flex flex-col"><span className="text-[10px] uppercase text-amber-500/70">SPI Projection</span><span className="text-xl font-mono font-bold text-amber-400">{previewResult.schedule_index.toFixed(2)}</span></div>
+                             <div className="flex flex-col"><span className="text-[10px] uppercase text-amber-500/70">CPI Projection</span><span className="text-xl font-mono font-bold text-amber-400">{previewResult.cost_index.toFixed(2)}</span></div>
+                             <div className="flex flex-col"><span className="text-[10px] uppercase text-amber-500/70">Points Expected</span><span className="text-xl font-mono font-bold text-amber-400">+{Math.round(previewResult.points_earned)}</span></div>
+                           </div>
+                        </div>
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-purple-500/30 space-y-4 mt-6">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-purple-400">Pre-Lock Forecast</div>
+                          <p className="text-xs text-slate-400">Before locking, predict your performance. Future rounds will tie point bonuses to prediction calibration.</p>
+                          <div className="space-y-6 pt-2">
+                             <DecisionSlider
+                               label="Predicted SPI"
+                               value={forecast.predicted_schedule_index}
+                               min={0.60}
+                               max={1.35}
+                               step={0.01}
+                               onChange={(v) => { setHasUnsavedChanges(true); setForecast(p => ({...p, predicted_schedule_index: v})); }}
+                               disabled={isLocked}
+                               formatValue={(v) => v.toFixed(2)}
+                               hint="> 1.0 means ahead of schedule"
+                             />
+                             <DecisionSlider
+                               label="Predicted CPI"
+                               value={forecast.predicted_cost_index}
+                               min={0.60}
+                               max={1.50}
+                               step={0.01}
+                               onChange={(v) => { setHasUnsavedChanges(true); setForecast(p => ({...p, predicted_cost_index: v})); }}
+                               disabled={isLocked}
+                               formatValue={(v) => v.toFixed(2)}
+                               hint="> 1.0 means under budget"
+                             />
+                             <DecisionSlider
+                               label="Confidence Level"
+                               value={forecast.confidence}
+                               min={0}
+                               max={100}
+                               step={5}
+                               onChange={(v) => { setHasUnsavedChanges(true); setForecast(p => ({...p, confidence: v})); }}
+                               disabled={isLocked}
+                               formatValue={(v) => v + "%"}
+                               hint="Over-confidence will be heavily penalized later."
+                             />
+                          </div>
+                        </div>
+                     </div>
+                   )}
+                </div>
+
+                {/* SIDEBAR ZONE */}
+                <div className="w-full shrink-0 flex flex-col gap-6 lg:sticky lg:top-28">
+                  <div className="p-5 rounded-2xl bg-slate-900/60 border border-white/5">
+                    <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-4">Readiness Protocol</div>
+                    <div className="space-y-2">
+                       {readinessChecks.map((check) => (
+                         <div key={check.label} className="text-xs flex items-center justify-between gap-2">
+                           <span className={check.pass ? "text-slate-300" : "text-amber-500 font-semibold"}>{check.label}</span>
+                           <span className={`w-2 h-2 rounded-full flex-shrink-0 ${check.pass ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" : "bg-rose-500"}`}></span>
+                         </div>
+                       ))}
+                    </div>
                   </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="secondary" onClick={saveDraft} disabled={saving || locking || savingKpiTarget || formReadOnly}>
-                      {saving ? "Saving..." : "Save Draft"}
-                    </Button>
-                    <Button onClick={lockAndGenerateResults} disabled={locking || saving || savingKpiTarget || formReadOnly || !stepValidations[4]}>
-                      {locking ? "Locking..." : roundStatus === "closed" ? "Round Closed" : lockBlockedByDeadline ? "Lock Window Closed" : "Lock and Generate Results"}
-                    </Button>
-                    {locked ? (
-                      <Link
-                        href={`/sessions/${sessionId}/round/${roundNumber}/results`}
-                        className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50"
-                      >
-                        View Results
-                      </Link>
-                    ) : null}
-                  </div>
-                </CardBody>
-              </Card>
-            </>
+                </div>
+             </div>
+             </>
           )}
-        </div>
+        </main>
+
+        {/* FOOTER CTA ZONE (Sticky) */}
+        {!loading && (
+          <footer className="fixed bottom-0 left-0 right-0 z-50 bg-[#020617]/90 backdrop-blur-xl border-t border-white/10 p-4 shadow-[0_-20px_40px_rgba(0,0,0,0.5)]">
+            <div className="max-w-[1180px] mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div className="flex items-center justify-between md:justify-start w-full md:w-auto gap-4">
+                <Button variant="ghost" onClick={prevStep} disabled={activeStep === 0 || isLocked} className="text-slate-400 hover:text-white">
+                  &lt; Previous
+                </Button>
+                <div className="hidden md:flex flex-row gap-1">
+                  {[0,1,2,3,4].map(idx => (
+                     <div key={idx} className={`w-8 h-2 rounded-full transition-all ${activeStep === idx ? "bg-blue-500" : activeStep > idx ? "bg-blue-900" : "bg-slate-800"}`} />
+                  ))}
+                </div>
+                <Button variant="ghost" onClick={nextStep} disabled={activeStep === 4 || !stepValidations[activeStep] || isLocked} className="text-slate-400 hover:text-white">
+                  Next &gt;
+                </Button>
+              </div>
+
+              <div className="flex flex-col md:flex-row md:items-center gap-3 w-full md:w-auto">
+                 {isLocked ? (
+                   <Link href={`/sessions/${sessionId}/round/${roundNumber}/results`} className="w-full md:w-auto">
+                     <Button className="w-full md:w-auto bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-500/20 border-emerald-500 font-bold uppercase tracking-widest text-[11px] py-3">
+                       VIEW IMPACT REPORT
+                     </Button>
+                   </Link>
+                 ) : (
+                   <>
+                     <div className="flex items-center justify-center md:justify-end pr-2 font-mono text-[10px] font-bold tracking-widest">
+                       {hasUnsavedChanges ? (
+                         <span className="text-amber-400 animate-pulse uppercase">Unsaved Draft</span>
+                       ) : (
+                         <span className="text-emerald-500 uppercase">Input Accepted</span>
+                       )}
+                     </div>
+                     <Button variant="secondary" onClick={saveDraft} disabled={saving || isLocked} className="w-full md:w-auto border-slate-700 bg-slate-900 text-slate-300 py-3 text-[11px] tracking-widest">
+                       {saving ? "SAVING..." : "SAVE DRAFT"}
+                     </Button>
+                     <Button onClick={lockAndGenerateResults} disabled={locking || saving || isLocked || !stepValidations[4]} className="w-full md:w-auto shadow-blue-500/40 py-3 text-[11px] tracking-widest">
+                       {locking ? "INITIALIZING..." : lockBlockedByDeadline ? "WINDOW CLOSED" : "LOCK & RUN SIMULATION"}
+                     </Button>
+                   </>
+                 )}
+              </div>
+            </div>
+          </footer>
+        )}
       </div>
     </RequireAuth>
   );
 }
+
+
+
+

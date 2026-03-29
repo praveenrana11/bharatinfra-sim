@@ -1,4 +1,4 @@
-﻿import { ConstructionEvent } from "@/lib/constructionNews";
+import { ConstructionEvent } from "@/lib/constructionNews";
 import {
   DecisionProfile,
   DEFAULT_DECISION_PROFILE,
@@ -42,8 +42,21 @@ export type RoundComputationContext = {
   events?: ConstructionEvent[];
 };
 
+type RiskDebtState = {
+  delivery: number;
+  quality: number;
+  safety: number;
+  stakeholder: number;
+  compliance: number;
+  cash: number;
+};
+
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
+}
+
+function toNumber(value: unknown, fallback = 0) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 function seededUnit(seed: string) {
@@ -76,6 +89,31 @@ function eventSeverityFactor(severity: 1 | 2 | 3) {
   if (severity === 2) return 1;
   return 1.35;
 }
+function emptyRiskDebt(): RiskDebtState {
+  return {
+    delivery: 0,
+    quality: 0,
+    safety: 0,
+    stakeholder: 0,
+    compliance: 0,
+    cash: 0,
+  };
+}
+
+function riskDebtFromResult(prevResult?: RoundResult | null): RiskDebtState {
+  const raw = prevResult?.detail?.riskDebt;
+  if (!raw || typeof raw !== "object") return emptyRiskDebt();
+  const source = raw as Record<string, unknown>;
+
+  return {
+    delivery: clamp(toNumber(source.delivery), 0, 100),
+    quality: clamp(toNumber(source.quality), 0, 100),
+    safety: clamp(toNumber(source.safety), 0, 100),
+    stakeholder: clamp(toNumber(source.stakeholder), 0, 100),
+    compliance: clamp(toNumber(source.compliance), 0, 100),
+    cash: clamp(toNumber(source.cash), 0, 100),
+  };
+}
 
 function sectorTags(sector: ConstructionSector | SecondarySector) {
   if (sector === "Roads & Highways") return ["roads"];
@@ -87,6 +125,53 @@ function sectorTags(sector: ConstructionSector | SecondarySector) {
   if (sector === "Heavy Civil & Industrial") return ["heavy-civil", "industrial"];
   return [];
 }
+function sectorTagSensitivity(sector: ConstructionSector, tag: string) {
+  if (tag === "all-sectors") return 1;
+
+  if (sector === "Roads & Highways") {
+    if (["roads", "monsoon", "logistics", "cost"].includes(tag)) return 1.24;
+    if (["bridges", "public-procurement", "climate"].includes(tag)) return 1.1;
+    if (["transmission", "real-estate"].includes(tag)) return 0.82;
+  }
+
+  if (sector === "Transmission & Power") {
+    if (["transmission", "power", "regulatory", "safety"].includes(tag)) return 1.25;
+    if (["labor", "compliance", "governance"].includes(tag)) return 1.12;
+    if (["real-estate", "residential"].includes(tag)) return 0.78;
+  }
+
+  if (sector === "Bridges & Flyovers") {
+    if (["bridges", "quality", "safety", "monsoon"].includes(tag)) return 1.24;
+    if (["logistics", "public-procurement"].includes(tag)) return 1.1;
+    if (["transmission", "residential"].includes(tag)) return 0.8;
+  }
+
+  if (sector === "Airports & Metro") {
+    if (["airports", "metro", "regulatory", "stakeholder"].includes(tag)) return 1.24;
+    if (["public-procurement", "sustainability", "compliance"].includes(tag)) return 1.14;
+    if (["roads", "dams"].includes(tag)) return 0.84;
+  }
+
+  if (sector === "Dams & Irrigation") {
+    if (["dams", "irrigation", "monsoon", "climate"].includes(tag)) return 1.3;
+    if (["safety", "quality", "logistics"].includes(tag)) return 1.14;
+    if (["residential", "real-estate"].includes(tag)) return 0.76;
+  }
+
+  if (sector === "Residential & Real Estate") {
+    if (["residential", "real-estate", "demand"].includes(tag)) return 1.3;
+    if (["stakeholder", "regulatory"].includes(tag)) return 1.12;
+    if (["dams", "transmission"].includes(tag)) return 0.78;
+  }
+
+  if (sector === "Heavy Civil & Industrial") {
+    if (["heavy-civil", "industrial", "safety", "labor"].includes(tag)) return 1.24;
+    if (["cost", "logistics", "compliance"].includes(tag)) return 1.12;
+    if (["real-estate", "residential"].includes(tag)) return 0.8;
+  }
+
+  return 1;
+}
 
 function sectorDifficulty(sector: ConstructionSector) {
   if (sector === "Roads & Highways") return 0.45;
@@ -96,6 +181,30 @@ function sectorDifficulty(sector: ConstructionSector) {
   if (sector === "Dams & Irrigation") return 0.82;
   if (sector === "Residential & Real Estate") return 0.4;
   return 0.75;
+}
+function sectorSpecificEventMultiplier(event: ConstructionEvent, profile: DecisionProfile) {
+  if (event.tags.length === 0) return 1;
+
+  const primaryWeights = event.tags.map((tag) => sectorTagSensitivity(profile.primary_sector, tag));
+  const primaryAvg = primaryWeights.reduce((sum, value) => sum + value, 0) / primaryWeights.length;
+
+  const secondarySector = profile.secondary_sector === "None" ? null : profile.secondary_sector;
+  const secondaryAvg =
+    secondarySector === null
+      ? 1
+      : event.tags
+          .map((tag) => sectorTagSensitivity(secondarySector, tag))
+          .reduce((sum, value) => sum + value, 0) / event.tags.length;
+
+  const blended = primaryAvg * 0.82 + secondaryAvg * 0.18;
+  const publicMixAdj =
+    event.tags.includes("public-procurement") || event.tags.includes("governance")
+      ? profile.project_mix_public_pct >= 60
+        ? 1.08
+        : 0.94
+      : 1;
+
+  return clamp(blended * publicMixAdj, 0.72, 1.42);
 }
 
 function eventRelevance(event: ConstructionEvent, profile: DecisionProfile) {
@@ -119,7 +228,10 @@ function eventRelevance(event: ConstructionEvent, profile: DecisionProfile) {
 function aggregateEventImpacts(events: ConstructionEvent[], profile: DecisionProfile) {
   return events.reduce(
     (acc, event) => {
-      const factor = eventSeverityFactor(event.severity) * eventRelevance(event, profile);
+      const factor =
+        eventSeverityFactor(event.severity) *
+        eventRelevance(event, profile) *
+        sectorSpecificEventMultiplier(event, profile);
       acc.schedule += event.impacts.schedule * factor;
       acc.cost += event.impacts.cost * factor;
       acc.quality += event.impacts.quality * factor;
@@ -202,29 +314,39 @@ function profileCostAdjustment(profile: DecisionProfile) {
   return logisticsCost + expansionCost + financeCost;
 }
 
-function delayedEffects(prevProfile?: DecisionProfile | null) {
-  if (!prevProfile) {
-    return { schedule: 0, quality: 0, safety: 0, cost: 0 };
+function delayedEffects(
+  prevProfile?: DecisionProfile | null,
+  prevResult?: RoundResult | null,
+  prevDebt: RiskDebtState = emptyRiskDebt()
+) {
+  if (!prevProfile && !prevResult) {
+    return { schedule: 0, quality: 0, safety: 0, cost: 0, stakeholder: 0, cash: 0 };
   }
 
-  const trainingCarry = (prevProfile.training_intensity - 50) / 3000;
-  const innovationCarry = (prevProfile.innovation_budget_index - 50) / 2800;
+  const trainingCarry = prevProfile ? (prevProfile.training_intensity - 50) / 3000 : 0;
+  const innovationCarry = prevProfile ? (prevProfile.innovation_budget_index - 50) / 2800 : 0;
 
   const overtimePenalty =
-    prevProfile.overtime_policy === "High Intensity"
+    prevProfile?.overtime_policy === "High Intensity"
       ? 0.018
-      : prevProfile.overtime_policy === "Flexible"
+      : prevProfile?.overtime_policy === "Flexible"
         ? 0.007
         : 0;
 
+  const reworkLag = prevResult ? Math.max(0, 74 - prevResult.quality_score) / 240 : 0;
+  const safetyLag = prevResult ? Math.max(0, 76 - prevResult.safety_score) / 16 : 0;
+  const stakeholderLag = prevResult ? Math.max(0, 74 - prevResult.stakeholder_score) / 12 : 0;
+  const debtCashLag = prevDebt.cash * 680;
+
   return {
-    schedule: trainingCarry + innovationCarry,
-    quality: (prevProfile.innovation_budget_index - 50) / 4.5,
-    safety: (prevProfile.training_intensity - 50) / 5 - overtimePenalty * 100,
-    cost: overtimePenalty,
+    schedule: trainingCarry + innovationCarry - reworkLag,
+    quality: (prevProfile ? (prevProfile.innovation_budget_index - 50) / 4.5 : 0) - prevDebt.quality * 0.02,
+    safety: (prevProfile ? (prevProfile.training_intensity - 50) / 5 : 0) - overtimePenalty * 100 - safetyLag,
+    cost: overtimePenalty + prevDebt.delivery / 3800,
+    stakeholder: (prevProfile?.community_engagement ? (prevProfile.community_engagement - 50) / 20 : 0) - stakeholderLag,
+    cash: -Math.round(debtCashLag),
   };
 }
-
 function subcontractorAdjustment(profile: DecisionProfile) {
   const subcontractShare = (100 - profile.self_perform_percent) / 100;
 
@@ -251,7 +373,8 @@ export function computeRoundResultV2(
 ): RoundResult {
   const profile = context.profile ?? DEFAULT_DECISION_PROFILE;
   const prevResult = context.prevResult ?? null;
-  const delayed = delayedEffects(context.prevProfile);
+  const prevDebt = riskDebtFromResult(prevResult);
+  const delayed = delayedEffects(context.prevProfile, prevResult, prevDebt);
   const events = context.events ?? [];
   const eventAgg = aggregateEventImpacts(events, profile);
   const budget = estimateBudgetBreakdown(profile);
@@ -308,6 +431,7 @@ export function computeRoundResultV2(
       profileScheduleAdjustment(profile) +
       delayed.schedule +
       momentum +
+      -prevDebt.delivery / 2500 +
       eventAgg.schedule +
       contextAdj +
       subcontractor.schedule +
@@ -329,6 +453,8 @@ export function computeRoundResultV2(
       profileCostAdjustment(profile) -
       delayed.cost +
       eventAgg.cost +
+      -prevDebt.cash / 3000 +
+      -prevDebt.compliance / 4200 +
       subcontractor.cost +
       workloadAdj.cost +
       (pmEfficiency - 0.7) * 0.04 -
@@ -345,6 +471,7 @@ export function computeRoundResultV2(
       (profile.innovation_budget_index - 50) * 0.18 +
       delayed.quality +
       eventAgg.quality +
+      -prevDebt.quality * 0.05 +
       subcontractor.quality +
       workloadAdj.quality +
       specializationGain * 4 +
@@ -361,6 +488,7 @@ export function computeRoundResultV2(
       (profile.training_intensity - 50) * 0.14 +
       delayed.safety +
       eventAgg.safety +
+      -prevDebt.safety * 0.06 +
       subcontractor.safety +
       workloadAdj.safety +
       (profile.work_life_balance_index - 50) * 0.15 -
@@ -375,7 +503,10 @@ export function computeRoundResultV2(
       (profile.community_engagement - 50) * 0.2 +
       (profile.transparency_level === "Public Dashboard" ? 6 : profile.transparency_level === "Standard" ? -2 : 2) +
       (profile.public_message_tone === "Collaborative" ? 4 : profile.public_message_tone === "Aggressive" ? -3 : 1) +
+      delayed.stakeholder +
       eventAgg.stakeholder +
+      -prevDebt.stakeholder * 0.05 +
+      -prevDebt.compliance * 0.04 +
       subcontractor.stakeholder +
       workloadAdj.stakeholder +
       (profile.csr_sustainability_index - 50) * 0.16 +
@@ -393,6 +524,7 @@ export function computeRoundResultV2(
       (d.governance_intensity === "High" ? 10 : d.governance_intensity === "Low" ? -4 : 2) +
       (profile.transparency_level === "Public Dashboard" ? 5 : profile.transparency_level === "Proactive" ? 3 : 0) +
       (profile.bid_aggressiveness >= 4 ? -3 : 2) +
+      -prevDebt.compliance * 0.04 +
       (profile.compliance_posture === "Strict Compliance"
         ? 5
         : profile.compliance_posture === "High-Risk Facilitation"
@@ -404,6 +536,20 @@ export function computeRoundResultV2(
 
   let penalties = Math.round(focusPenalty * 2);
   const penaltyBreakdown: Record<string, number> = { focus_discipline: Math.round(focusPenalty * 2) };
+
+  const prevDebtTotal =
+    prevDebt.delivery +
+    prevDebt.quality +
+    prevDebt.safety +
+    prevDebt.stakeholder +
+    prevDebt.compliance +
+    prevDebt.cash;
+
+  if (prevDebtTotal > 120) {
+    const carryPenalty = Math.round((prevDebtTotal - 120) * 0.12);
+    penalties += carryPenalty;
+    penaltyBreakdown.risk_debt_carryforward = carryPenalty;
+  }
 
   if (profile.market_expansion === "Scale Two New Regions" && profile.workforce_plan === "Lean Core Team") {
     penalties += 26;
@@ -468,6 +614,77 @@ export function computeRoundResultV2(
     penaltyBreakdown.policy_misalignment = 6;
   }
 
+  const liquidityStressIndex =
+    (budget.total_budget_pressure > 4_000_000 ? 12 : 0) +
+    (profile.cash_buffer_months < 3 ? 10 : 0) +
+    (cost_index < 0.95 ? (0.95 - cost_index) * 120 : 0);
+
+  const currentDebt: RiskDebtState = {
+    delivery: clamp(
+      prevDebt.delivery * 0.62 +
+        (schedule_index < 0.98 ? (0.98 - schedule_index) * 125 : -6) +
+        (profile.market_expansion === "Scale Two New Regions" ? 7 : 0),
+      0,
+      100
+    ),
+    quality: clamp(
+      prevDebt.quality * 0.62 +
+        (quality_score < 75 ? (75 - quality_score) * 0.95 : -7) +
+        (d.focus_speed > 35 && profile.qa_audit_frequency === "Monthly" ? 9 : 0),
+      0,
+      100
+    ),
+    safety: clamp(
+      prevDebt.safety * 0.64 +
+        (safety_score < 76 ? (76 - safety_score) : -8) +
+        (profile.workforce_load_state === "Overloaded" ? 7 : 0),
+      0,
+      100
+    ),
+    stakeholder: clamp(
+      prevDebt.stakeholder * 0.63 +
+        (stakeholder_score < 74 ? (74 - stakeholder_score) * 0.85 : -6) +
+        (profile.public_message_tone === "Aggressive" ? 4 : 0),
+      0,
+      100
+    ),
+    compliance: clamp(
+      prevDebt.compliance * 0.68 +
+        (profile.compliance_posture === "High-Risk Facilitation"
+          ? profile.facilitation_budget_index * 0.36
+          : profile.compliance_posture === "Strict Compliance"
+            ? -8
+            : -2),
+      0,
+      100
+    ),
+    cash: clamp(
+      prevDebt.cash * 0.6 +
+        liquidityStressIndex +
+        (profile.financing_posture === "Growth Debt" ? 5 : 0),
+      0,
+      100
+    ),
+  };
+
+  const currentDebtTotal =
+    currentDebt.delivery +
+    currentDebt.quality +
+    currentDebt.safety +
+    currentDebt.stakeholder +
+    currentDebt.compliance +
+    currentDebt.cash;
+
+  const debtLoadPenalty = Math.round(currentDebtTotal * 0.08);
+  if (debtLoadPenalty > 0) {
+    penalties += debtLoadPenalty;
+    penaltyBreakdown.current_risk_debt = debtLoadPenalty;
+  }
+
+  const debtImprovementBonus =
+    prevDebtTotal > 0 && currentDebtTotal + 8 < prevDebtTotal
+      ? Math.round((prevDebtTotal - currentDebtTotal) * 0.14)
+      : 0;
   const strategyAlignmentBonus = strategicBonus(profile, d);
   const resilienceBonus = hasMonsoonShock && profile.logistics_resilience === "High Resilience" ? 8 : 0;
   const sectorFitBonus = Math.round((profile.specialized_work_index - 50) * 0.18 * (0.7 + sectorComplexity));
@@ -480,6 +697,7 @@ export function computeRoundResultV2(
     stakeholder_score * 0.9 +
     claim_entitlement_score * 0.56 +
     strategyAlignmentBonus +
+    debtImprovementBonus +
     resilienceBonus +
     sectorFitBonus;
 
@@ -508,7 +726,9 @@ export function computeRoundResultV2(
       financingBoost +
       prevCarry +
       eventAgg.cash +
-      facilitationExposureCash
+      delayed.cash +
+      facilitationExposureCash +
+      -prevDebt.cash * 1700
   );
 
   return {
@@ -523,12 +743,20 @@ export function computeRoundResultV2(
     penalties,
     detail: {
       seed,
-      events: events.map((event) => ({
-        id: event.id,
-        title: event.title,
-        severity: event.severity,
-        tags: event.tags,
-      })),
+      events: events.map((event) => {
+        const relevance = eventRelevance(event, profile);
+        const sectorMultiplier = sectorSpecificEventMultiplier(event, profile);
+        const severityFactor = eventSeverityFactor(event.severity);
+        return {
+          id: event.id,
+          title: event.title,
+          severity: event.severity,
+          tags: event.tags,
+          relevance: Number(relevance.toFixed(3)),
+          sector_multiplier: Number(sectorMultiplier.toFixed(3)),
+          combined_factor: Number((relevance * sectorMultiplier * severityFactor).toFixed(3)),
+        };
+      }),
       eventAggregate: {
         schedule: Number(eventAgg.schedule.toFixed(3)),
         cost: Number(eventAgg.cost.toFixed(3)),
@@ -544,9 +772,15 @@ export function computeRoundResultV2(
       strategyAlignmentBonus,
       resilienceBonus,
       sectorFitBonus,
+      debtImprovementBonus,
       focusSum: sumFocus(d),
       penaltyBreakdown,
       delayedEffects: delayed,
+      riskDebt: currentDebt,
+      riskDebtTotals: {
+        previous: Number(prevDebtTotal.toFixed(2)),
+        current: Number(currentDebtTotal.toFixed(2)),
+      },
       sectorComplexity,
       pmEfficiency: Number(pmEfficiency.toFixed(3)),
       specializationGain: Number(specializationGain.toFixed(3)),
@@ -562,4 +796,3 @@ export function computePlaceholderRoundResult(d: DecisionDraft, seed: string): R
     events: [],
   });
 }
-

@@ -1,4 +1,4 @@
-﻿import * as React from "react";
+import * as React from "react";
 
 export const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
   function Input({ className = "", ...props }, ref) {
@@ -7,9 +7,9 @@ export const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttribute
         ref={ref}
         {...props}
         className={
-          "mt-1 block w-full rounded-lg border border-slate-300/90 bg-white px-3 py-2 text-sm " +
-          "text-slate-900 placeholder:text-slate-400 shadow-sm " +
-          "focus:border-teal-400 focus:outline-none focus:ring-2 focus:ring-teal-400/30 " +
+          "mt-1 block w-full rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm " +
+          "text-white placeholder:text-slate-500 shadow-inner " +
+          "focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 " +
           className
         }
       />

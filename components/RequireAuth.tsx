@@ -18,14 +18,25 @@ export default function RequireAuth({
     const supabase = getSupabaseClient();
     let cancelled = false;
 
+    const fallbackTimer = setTimeout(() => {
+      if (!cancelled) {
+         router.replace(redirectTo);
+      }
+    }, 2500);
+
     supabase.auth.getUser().then(({ data, error }) => {
       if (cancelled) return;
+      clearTimeout(fallbackTimer);
 
       if (error || !data.user) {
         router.replace(redirectTo);
         return;
       }
       setLoading(false);
+    }).catch(() => {
+      if (cancelled) return;
+      clearTimeout(fallbackTimer);
+      router.replace(redirectTo);
     });
 
     const { data } = supabase.auth.onAuthStateChange((_evt, session) => {

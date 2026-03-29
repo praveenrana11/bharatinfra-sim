@@ -3,48 +3,34 @@
 @tailwind utilities;
 
 :root {
-  --bg-top: #f4f8ff;
-  --bg-bottom: #f7fbff;
-  --ink: #0f172a;
-  --muted: #475569;
-  --brand: #0f766e;
-  --brand-strong: #115e59;
-  --brand-soft: #ccfbf1;
-  --line: #dbe6ef;
-  --card: rgba(255, 255, 255, 0.9);
+  --ink: #e2e8f0;
+  --muted: #94a3b8;
+  --brand: #2563eb;
+  --line: #1e293b;
+  --card: rgba(15, 23, 42, 0.9);
 }
 
-html,
-body {
+html, body {
   min-height: 100%;
 }
 
 body {
   margin: 0;
   color: var(--ink);
-  background:
-    radial-gradient(circle at 6% 6%, rgba(20, 184, 166, 0.16) 0, rgba(20, 184, 166, 0) 34%),
-    radial-gradient(circle at 95% 18%, rgba(249, 115, 22, 0.12) 0, rgba(249, 115, 22, 0) 28%),
-    radial-gradient(circle at 50% 110%, rgba(59, 130, 246, 0.1) 0, rgba(59, 130, 246, 0) 42%),
-    linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 58%, #f8fafc 100%);
-  font-family: "Source Sans Pro", "Segoe UI", Tahoma, sans-serif;
+  background-color: #020617; /* Slate 950 */
+  background-image: 
+    radial-gradient(circle at 10% 20%, rgba(37, 99, 235, 0.15) 0, transparent 40%),
+    radial-gradient(circle at 90% 80%, rgba(79, 70, 229, 0.1) 0, transparent 40%);
+  font-family: "Inter", "Source Sans Pro", "Segoe UI", sans-serif;
 }
 
-h1,
-h2,
-h3,
-h4,
-h5,
-h6 {
-  font-family: "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
-  letter-spacing: 0.01em;
-}
-
-.section-anchor-offset {
-  scroll-margin-top: 90px;
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Outfit", "Avenir Next", "Segoe UI", sans-serif;
+  letter-spacing: 0.02em;
 }
 
 .glass-panel {
   background: var(--card);
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }

@@ -8,13 +8,21 @@ import { getSupabaseClient } from "@/lib/supabaseClient";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ConstructionEvent, getRoundConstructionEvents } from "@/lib/constructionNews";
+import RoundStepper, { RoundNode, RoundState } from "@/components/RoundStepper";
 import { computeRoundResultV2, DecisionDraft, RoundResult } from "@/lib/simEngine";
 import { parseDecisionProfile, DEFAULT_DECISION_PROFILE, DecisionProfile } from "@/lib/decisionProfile";
 import { parseKpiTarget, evaluateKpiAchievement, applyKpiMultiplier } from "@/lib/kpi";
 
 type RouteParams = { sessionId?: string };
 type MembershipRow = { team_id: string };
-type TeamRow = { id: string; team_name: string; session_id: string; total_points: number | null; kpi_target: string | null };
+type TeamRow = {
+  id: string;
+  team_name: string;
+  session_id: string;
+  total_points: number | null;
+  kpi_target: string | null;
+  identity_completed: boolean;
+};
 type SessionTeamRow = { id: string; kpi_target: string | null };
 
 type DecisionRow = DecisionDraft & {
@@ -62,6 +70,10 @@ type SessionRoundRow = {
   deadline_at: string;
   status: string | null;
   news_payload: unknown;
+};
+
+type SessionRoundStatusRow = {
+  status: string | null;
 };
 
 const DEFAULT_ROUND_WINDOW_MINUTES = 35;
@@ -261,7 +273,7 @@ export default function SessionPage() {
 
       const { data: teamsData, error: tErr } = await supabase
         .from("teams")
-        .select("id, team_name, session_id, total_points, kpi_target")
+        .select("id, team_name, session_id, total_points, kpi_target, identity_completed")
         .in("id", teamIds)
         .eq("session_id", sessionId);
 
@@ -282,6 +294,27 @@ export default function SessionPage() {
       setTeamName(myTeam.team_name ?? "");
       setPoints(myTeam.total_points ?? 0);
       setTeamKpi(myTeam.kpi_target ?? "Not selected");
+
+      if (!myTeam.identity_completed && (session.current_round ?? 0) === 1) {
+        const { data: currentRoundData, error: currentRoundErr } = await supabase
+          .from("session_rounds")
+          .select("status")
+          .eq("session_id", sessionId)
+          .eq("round_number", 1)
+          .maybeSingle();
+
+        if (currentRoundErr) {
+          setError(currentRoundErr.message);
+          setLoading(false);
+          return;
+        }
+
+        const currentRoundState = currentRoundData as SessionRoundStatusRow | null;
+        if (currentRoundState?.status && ["pending", "open"].includes(currentRoundState.status)) {
+          router.replace(`/sessions/${sessionId}/identity`);
+          return;
+        }
+      }
 
       const { data: lastResultData, error: rErr } = await supabase
         .from("team_results")
@@ -835,193 +868,133 @@ async function autoCloseRoundWithAutolock(closeIso: string): Promise<AutoCloseSu
     }
   }
 
+  const roundsList: RoundNode[] = [];
+  for (let i = 1; i <= roundCount; i++) {
+    let state: RoundState = "pending";
+    if (i < nextRound) state = "completed";
+    else if (i === nextRound && roundStatus === "open") state = "active";
+    else if (i === nextRound && roundStatus === "closed") state = "locked";
+
+    roundsList.push({
+      round_number: i,
+      state,
+      label: i === nextRound ? (roundStatus === "open" ? "Awaiting your strategic move." : "Move locked. Awaiting Game Master.") : i < nextRound ? "Round completed." : "Future operations phase.",
+    });
+  }
+
+  function handleEnterRound(rNum: number) {
+    router.push(`/sessions/${sessionId}/round/${rNum}`);
+  }
+
   return (
     <RequireAuth>
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight text-slate-900">Session Hub</h1>
-            <p className="mt-1 text-sm text-slate-600">Manage round flow, live locks, news, and analysis.</p>
+      <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
+        {/* Main Content (Missions / Stepper) */}
+        <div className="flex-1 space-y-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-3xl font-black tracking-tight text-white uppercase">Mission Control</h1>
+              <p className="mt-1 text-sm text-blue-400/80 uppercase tracking-widest font-semibold">{sessionName || "Loading..."} // CODE: {code}</p>
+            </div>
+            <Link className="text-sm font-bold text-slate-400 hover:text-white" href="/dashboard">
+              [ RETURN TO ARENA ]
+            </Link>
           </div>
-          <Link className="text-sm underline text-slate-700" href="/dashboard">
-            Dashboard
-          </Link>
+
+          {error ? (
+            <div className="rounded-lg border border-rose-500/50 bg-rose-500/10 p-4 text-sm font-semibold text-rose-400 shadow-inner">{error}</div>
+          ) : null}
+
+          {loading ? (
+            <div className="animate-pulse rounded-xl border border-slate-800 bg-slate-900/50 p-6">
+              <div className="h-6 w-1/3 rounded bg-slate-800"></div>
+            </div>
+          ) : (
+            <Card>
+              <CardHeader title="Operational Timeline" subtitle="Proceed through the strategic phases." />
+              <CardBody>
+                {isComplete ? (
+                   <div className="mb-6 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4 text-sm font-bold text-emerald-400">
+                     MISSION CRITICAL OBJECTIVES ACHIEVED. RETURN TO ARENA.
+                   </div>
+                ) : null}
+                <RoundStepper rounds={roundsList} currentRoundId={nextRound} onEnterRound={handleEnterRound} />
+              </CardBody>
+            </Card>
+          )}
         </div>
 
-        {error ? (
-          <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{error}</div>
-        ) : null}
-
-        {loading ? (
-          <Card>
-            <CardBody>
-              <p className="text-sm text-slate-600">Loading session...</p>
-            </CardBody>
-          </Card>
-        ) : (
-          <>
+        {/* Sidebar Info */}
+        {!loading && (
+          <div className="w-full shrink-0 space-y-6 lg:w-[320px]">
             <Card>
-              <CardHeader title={sessionName || "Session"} subtitle={`Code: ${code}`} />
-              <CardBody className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
-                <div className="rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="text-slate-500">Status</div>
-                  <div className="mt-1 font-semibold text-slate-900">{status || "pending"}</div>
+              <CardHeader title="Team Telemetry" />
+              <CardBody className="space-y-4">
+                <div>
+                  <div className="text-[10px] uppercase tracking-widest text-slate-500">Callsign</div>
+                  <div className="font-mono text-lg font-bold text-white">{teamName}</div>
                 </div>
-                <div className="rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="text-slate-500">Round progress</div>
-                  <div className="mt-1 font-semibold text-slate-900">
-                    {completedRound}/{roundCount}
-                  </div>
-                  <div className="mt-1 text-xs text-slate-500">Session marker: {sessionCurrentRound}/{roundCount}</div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-widest text-slate-500">Current XP</div>
+                  <div className="font-mono text-xl font-black text-blue-400">{points}</div>
                 </div>
-                <div className="rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="text-slate-500">Team</div>
-                  <div className="mt-1 font-semibold text-slate-900">{teamName}</div>
-                </div>
-                <div className="rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="text-slate-500">Total points</div>
-                  <div className="mt-1 font-semibold text-slate-900">{points}</div>
-                </div>
-                <div className="rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="text-slate-500">Team KPI target</div>
-                  <div className="mt-1 font-semibold text-slate-900">{teamKpi}</div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-widest text-slate-500">Active KPI Lock</div>
+                  <div className="text-sm font-semibold text-emerald-400">{teamKpi}</div>
                 </div>
               </CardBody>
             </Card>
 
             <Card>
-              <CardHeader
-                title={`Live Round ${nextRound} Orchestration`}
-                subtitle="Shared lock window, team progress, and round shocks"
-              />
-              <CardBody className="space-y-3 text-sm">
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <div className="rounded-lg border border-slate-200 bg-white p-3">
-                    <div className="text-slate-500">Round status</div>
-                    <div className="mt-1 font-semibold text-slate-900">{roundStatus}</div>
-                    <div className="mt-1 text-xs text-slate-500">
-                      Source: {orchestrationSource === "shared" ? "session_rounds" : "fallback"}
-                    </div>
-                  </div>
-
-                  <div className="rounded-lg border border-slate-200 bg-white p-3">
-                    <div className="text-slate-500">Lock progress</div>
-                    <div className="mt-1 font-semibold text-slate-900">
-                      {lockedTeams}/{teamCount || "-"} teams locked
-                    </div>
-                  </div>
-
-                  <div className="rounded-lg border border-slate-200 bg-white p-3">
-                    <div className="text-slate-500">Lock clock</div>
-                    <div className="mt-1 font-semibold text-slate-900">
-                      {msLeft === null
-                        ? "Initializing..."
-                        : lockWindowExpired
-                          ? "Window elapsed"
-                          : formatClock(msLeft)}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Round shocks preview</div>
-                  <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
-                    {roundShocks.slice(0, 4).map((event) => (
-                      <div key={event.id} className="rounded-lg border border-slate-200 bg-white p-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="font-semibold text-slate-900">{event.title}</div>
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                              event.severity >= 3
-                                ? "bg-rose-100 text-rose-700"
-                                : event.severity === 2
-                                  ? "bg-amber-100 text-amber-800"
-                                  : "bg-emerald-100 text-emerald-700"
-                            }`}
-                          >
-                            S{event.severity}
-                          </span>
-                        </div>
-                        <div className="mt-1 text-xs text-slate-600">{event.description}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Facilitator Controls</div>
-                  {isHost ? (
-                    <>
-                      <div className="flex flex-wrap gap-2">
-                        <Button onClick={openRoundByHost} disabled={adminBusy || isComplete}>
-                          {adminBusy ? "Working..." : `Open Round ${nextRound}`}
-                        </Button>
-                        <Button variant="secondary" onClick={() => void closeRoundByHost()} disabled={adminBusy || isComplete}>
-                          {adminBusy ? "Working..." : `Close + Auto-lock Round ${nextRound}`}
-                        </Button>
-                        <Button variant="secondary" onClick={() => extendDeadlineByHost(10)} disabled={adminBusy || isComplete}>
-                          +10 min deadline
-                        </Button>
-                      </div>
-                      <p className="text-xs text-slate-600">
-                        Host-only: open round, and close round with hard-deadline auto-lock for remaining teams.
-                      </p>
-                    </>
-                  ) : (
-                    <p className="text-xs text-slate-600">Waiting for facilitator to open/close rounds.</p>
-                  )}
-
-                  {adminMessage ? (
-                    <div className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs text-emerald-700">{adminMessage}</div>
-                  ) : null}
-
-                  {lastAutoCloseSummary ? (
-                    <div className="rounded border border-slate-200 bg-slate-50 px-2 py-2 text-xs text-slate-700">
-                      <div>Auto-locked teams: <b>{lastAutoCloseSummary.autoLockedTeams}</b></div>
-                      <div>Generated results: <b>{lastAutoCloseSummary.generatedResults}</b></div>
-                      <div>Already locked preserved: <b>{lastAutoCloseSummary.preservedLockedTeams}</b></div>
-                      <div>Total timeliness penalty: <b>{lastAutoCloseSummary.totalLatePenalty}</b></div>
-                    </div>
-                  ) : null}
-                </div>
-              </CardBody>
-            </Card>
-
-            <Card>
-              <CardHeader title="Next actions" subtitle="Move step-by-step through each round." />
-              <CardBody className="flex flex-wrap gap-3">
-                {!isComplete ? (
-                  (roundStatus === "open" && (orchestrationSource !== "shared" || !lockWindowExpired)) || isHost ? (
-                    <Link href={`/sessions/${sessionId}/round/${nextRound}`}>
-                      <Button>Go to Round {nextRound} Decisions</Button>
-                    </Link>
-                  ) : (
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                      Round is not open (or deadline has passed). Wait for facilitator action.
-                    </div>
-                  )
+              <CardHeader title="Live Events Intel" subtitle={`Round ${nextRound} Shocks`} />
+              <CardBody className="space-y-3">
+                {roundShocks.length === 0 ? (
+                  <div className="text-xs text-slate-500 italic">No anomalies detected.</div>
                 ) : (
-                  <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-                    Simulation complete
-                  </div>
+                  roundShocks.slice(0, 3).map((event) => (
+                    <div key={event.id} className="rounded border border-slate-700 bg-slate-900/50 p-3">
+                      <div className="flex justify-between items-start gap-2">
+                        <div className="text-sm font-bold text-white line-clamp-1">{event.title}</div>
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-black ${event.severity >= 3 ? "bg-rose-500/20 text-rose-400" : event.severity === 2 ? "bg-amber-500/20 text-amber-400" : "bg-blue-500/20 text-blue-400"}`}>
+                          S{event.severity}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-xs text-slate-400 line-clamp-2">{event.description}</div>
+                    </div>
+                  ))
                 )}
-
-                <Link href={`/sessions/${sessionId}/round/${nextRound}/news`}>
-                  <Button variant="secondary">Open Round News Desk</Button>
-                </Link>
-
-                <Link href={`/sessions/${sessionId}/report`}>
-                  <Button variant="secondary">Open FY Report</Button>
-                </Link>
-
-                {completedRound > 0 ? (
-                  <Link href={`/sessions/${sessionId}/round/${completedRound}/results`}>
-                    <Button variant="secondary">View Round {completedRound} Results</Button>
-                  </Link>
-                ) : null}
               </CardBody>
             </Card>
-          </>
+
+            {isHost && (
+              <Card className="border-amber-500/30">
+                <CardHeader title="Game Master Override" className="border-amber-500/20 text-amber-500" />
+                <CardBody className="space-y-3">
+                  <div className="text-xs text-slate-400">
+                    <span className="font-semibold text-slate-300">Lock Status:</span> {lockedTeams} / {teamCount} Teams Locked
+                  </div>
+                  <Button variant="secondary" onClick={openRoundByHost} disabled={adminBusy || isComplete || roundStatus === "open"} className="w-full border-amber-700/50 text-amber-400 hover:bg-amber-900/20 hover:text-amber-300">
+                    {adminBusy ? "Override Engaged..." : `Force Open Round ${nextRound}`}
+                  </Button>
+                  <Button variant="secondary" onClick={() => void closeRoundByHost()} disabled={adminBusy || isComplete || roundStatus === "closed"} className="w-full border-rose-700/50 text-rose-400 hover:bg-rose-900/20 hover:text-rose-300">
+                    {adminBusy ? "Locking Grid..." : `Force Auto-Lock Round ${nextRound}`}
+                  </Button>
+                  
+                  {adminMessage && (
+                    <div className="mt-2 rounded bg-slate-900 p-2 text-[10px] text-amber-400 font-mono">
+                      &gt; {adminMessage}
+                    </div>
+                  )}
+                </CardBody>
+              </Card>
+            )}
+            
+            <Link href={`/sessions/${sessionId}/report`} className="block w-full">
+              <Button variant="secondary" className="w-full shadow-lg border-white/10 hover:border-white/20">
+                ACCESS METRICS DASHBOARD
+              </Button>
+            </Link>
+          </div>
         )}
       </div>
     </RequireAuth>
