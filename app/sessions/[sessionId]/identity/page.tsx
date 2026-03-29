@@ -32,7 +32,14 @@ type IdentityProfile = {
   primary_kpi?: string;
 };
 
-type SessionRow = { id: string; name: string | null; code: string; current_round: number };
+type SessionRow = {
+  id: string;
+  name: string | null;
+  code: string;
+  current_round: number;
+  status: string;
+  created_by: string;
+};
 type MembershipRow = { team_id: string };
 type TeamRow = {
   id: string;
@@ -54,6 +61,21 @@ type ScenarioRow = {
   complexity: "moderate" | "high" | "extreme";
 };
 
+type PositioningOption = {
+  value: PositioningName;
+  title: string;
+  subtitle: string;
+  tone: string;
+  icon: string;
+  tradeoff: string;
+};
+
+type KpiOption = {
+  title: string;
+  description: string;
+  icon: string;
+};
+
 const ROLE_NAMES: RoleName[] = [
   "Project Director",
   "Finance & Contracts Head",
@@ -68,34 +90,42 @@ const STEP_TITLES = [
   "KPI Target Selection",
 ] as const;
 
-const POSITIONING_OPTIONS: Array<{ value: PositioningName; title: string; subtitle: string; tone: string }> = [
+const STEP_SHORT_LABELS = ["Profile", "Project", "Strategy", "KPIs"] as const;
+
+const POSITIONING_OPTIONS: PositioningOption[] = [
   {
     value: "Cost Leadership",
     title: "Cost Leadership",
-    subtitle: "Win on price. Tight margins, high volume, lean operations.",
-    tone: "from-sky-500/20 via-cyan-500/10 to-slate-950",
+    subtitle: "Win on price with disciplined commercial control and repeatable site execution.",
+    tone: "from-sky-500/25 via-cyan-500/10 to-slate-950",
+    icon: "\u{1F4B0}",
+    tradeoff: "Higher volume, tighter margins",
   },
   {
     value: "Quality & Compliance",
     title: "Quality & Compliance",
-    subtitle: "Win on delivery. Zero defects, full documentation, client trust.",
-    tone: "from-emerald-500/20 via-teal-500/10 to-slate-950",
+    subtitle: "Win on assurance with defect-free delivery, traceability, and audit-ready systems.",
+    tone: "from-emerald-500/25 via-teal-500/10 to-slate-950",
+    icon: "\u{1F3C6}",
+    tradeoff: "Lower volume, premium reputation",
   },
   {
     value: "Relationship & Escalation",
     title: "Relationship & Escalation",
-    subtitle: "Win on networks. Client intimacy, fast issue resolution.",
-    tone: "from-amber-500/20 via-orange-500/10 to-slate-950",
+    subtitle: "Win on trust with faster issue resolution, executive access, and calmer stakeholders.",
+    tone: "from-amber-500/25 via-orange-500/10 to-slate-950",
+    icon: "\u{1F91D}",
+    tradeoff: "Client retention, referral driven",
   },
 ];
 
-const KPI_OPTIONS = [
-  ["Schedule Performance Index (SPI)", "Are you delivering on time?"],
-  ["Cost Performance Index (CPI)", "Are you delivering within budget?"],
-  ["Safety Score", "Incident-free execution"],
-  ["Stakeholder Satisfaction", "Client and community relations"],
-  ["Quality Compliance Rate", "Snag-free handovers"],
-] as const;
+const KPI_OPTIONS: KpiOption[] = [
+  { title: "Schedule Performance Index (SPI)", description: "Are you delivering on time?", icon: "\u23F1\uFE0F" },
+  { title: "Cost Performance Index (CPI)", description: "Are you delivering within budget?", icon: "\u{1F4B0}" },
+  { title: "Safety Score", description: "Incident-free execution", icon: "\u{1F9BA}" },
+  { title: "Stakeholder Satisfaction", description: "Client and community relations", icon: "\u{1F91D}" },
+  { title: "Quality Compliance Rate", description: "Snag-free handovers", icon: "\u2705" },
+];
 
 const EMPTY_ROLES: Record<RoleName, string> = {
   "Project Director": "",
@@ -133,13 +163,22 @@ function formatBudget(value: number | string | null) {
   if (value === null || value === undefined || value === "") return "TBD";
   const numeric = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(numeric)) return "TBD";
-  return `Rs ${numeric.toFixed(0)} Cr`;
+  return `\u20B9${numeric.toFixed(0)} Cr`;
 }
 
 function complexityClasses(complexity: ScenarioRow["complexity"]) {
-  if (complexity === "extreme") return "border-rose-400/30 bg-rose-500/10 text-rose-200";
-  if (complexity === "high") return "border-amber-400/30 bg-amber-500/10 text-amber-100";
-  return "border-emerald-400/30 bg-emerald-500/10 text-emerald-100";
+  if (complexity === "extreme") return "border-rose-400/40 bg-rose-500/15 text-rose-100";
+  if (complexity === "high") return "border-orange-400/40 bg-orange-500/15 text-orange-100";
+  return "border-emerald-400/40 bg-emerald-500/15 text-emerald-100";
+}
+
+function getScenarioTypeMeta(name: string) {
+  const lower = name.toLowerCase();
+  if (lower.includes("metro")) return { icon: "\u{1F687}", label: "Metro" };
+  if (lower.includes("airport")) return { icon: "\u2708\uFE0F", label: "Airport" };
+  if (lower.includes("industrial")) return { icon: "\u{1F3ED}", label: "Industrial" };
+  if (lower.includes("highway")) return { icon: "\u{1F6E3}\uFE0F", label: "Highway" };
+  return { icon: "\u{1F3D7}\uFE0F", label: "Project" };
 }
 
 function resolveInitialStep(profile: IdentityProfile, scenarioId: string | null): StepIndex {
@@ -154,39 +193,56 @@ function resolveInitialStep(profile: IdentityProfile, scenarioId: string | null)
   return 3;
 }
 
-function isIdentityWindowClosed(currentRound: number, roundStatus: string | null) {
-  if (currentRound > 1) return true;
-  if (currentRound === 1 && roundStatus && !["pending", "open"].includes(roundStatus)) return true;
-  return false;
+function isSessionCompleted(status: string | null | undefined) {
+  const normalized = status?.toLowerCase();
+  return normalized === "complete" || normalized === "completed";
 }
 
-function StepChip({ active, complete, index, title }: { active: boolean; complete: boolean; index: number; title: string }) {
+function StepRail({ currentStep }: { currentStep: StepIndex }) {
+  const connectorProgress = (currentStep / (STEP_SHORT_LABELS.length - 1)) * 75;
+
   return (
-    <div
-      className={`rounded-2xl border px-4 py-3 ${
-        active
-          ? "border-amber-400/40 bg-amber-500/10"
-          : complete
-            ? "border-emerald-400/30 bg-emerald-500/10"
-            : "border-white/10 bg-slate-950/70"
-      }`}
-    >
-      <div className="flex items-center gap-3">
+    <div className="rounded-3xl border border-white/10 bg-gradient-to-br from-white/10 via-slate-950/80 to-slate-950 p-6">
+      <div className="mb-5 flex items-center justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-300">Wizard Progress</div>
+          <div className="mt-2 text-lg font-black text-white">Build your team identity in four moves</div>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-right">
+          <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-500">Current Step</div>
+          <div className="mt-1 text-lg font-black text-white">{currentStep + 1}/4</div>
+        </div>
+      </div>
+
+      <div className="relative grid grid-cols-4 gap-3">
+        <div className="pointer-events-none absolute left-[12.5%] right-[12.5%] top-6 h-[3px] -translate-y-1/2 rounded-full bg-white/10" />
         <div
-          className={`flex h-9 w-9 items-center justify-center rounded-full border text-xs font-black ${
-            active
-              ? "border-amber-300 bg-amber-400/15 text-amber-100"
-              : complete
-                ? "border-emerald-300 bg-emerald-400/15 text-emerald-100"
-                : "border-white/10 bg-white/5 text-slate-400"
-          }`}
-        >
-          {complete ? "OK" : `0${index + 1}`}
-        </div>
-        <div className="min-w-0">
-          <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">Step {index + 1}</div>
-          <div className="truncate text-sm font-semibold text-white">{title}</div>
-        </div>
+          className="pointer-events-none absolute left-[12.5%] top-6 h-[3px] -translate-y-1/2 rounded-full bg-gradient-to-r from-emerald-400 via-amber-400 to-orange-400 transition-all duration-500"
+          style={{ width: `${connectorProgress}%` }}
+        />
+
+        {STEP_SHORT_LABELS.map((label, index) => {
+          const complete = index < currentStep;
+          const active = index === currentStep;
+
+          return (
+            <div key={label} className="relative flex flex-col items-center text-center">
+              <div
+                className={`flex h-12 w-12 items-center justify-center rounded-full border-2 text-sm font-black transition ${
+                  active
+                    ? "border-amber-300 bg-amber-400 text-white shadow-[0_14px_30px_rgba(251,191,36,0.28)]"
+                    : complete
+                      ? "border-emerald-300 bg-emerald-400 text-white"
+                      : "border-white/25 bg-slate-950 text-slate-300"
+                }`}
+              >
+                {complete ? "\u2713" : index + 1}
+              </div>
+              <div className="mt-4 text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">Step {index + 1}</div>
+              <div className={`mt-1 text-sm font-semibold ${active || complete ? "text-white" : "text-slate-400"}`}>{label}</div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -204,6 +260,8 @@ export default function SessionIdentityPage() {
   const [saveError, setSaveError] = useState("");
   const [saveNotice, setSaveNotice] = useState("");
   const [saving, setSaving] = useState(false);
+  const [showSuccessScreen, setShowSuccessScreen] = useState(false);
+  const [resettingIdentity, setResettingIdentity] = useState(false);
 
   const [sessionName, setSessionName] = useState("");
   const [sessionCode, setSessionCode] = useState("");
@@ -215,6 +273,7 @@ export default function SessionIdentityPage() {
   const [memberOptions, setMemberOptions] = useState<TeamMemberOption[]>([]);
   const [scenarios, setScenarios] = useState<ScenarioRow[]>([]);
   const [stepIndex, setStepIndex] = useState<StepIndex>(0);
+  const [isSessionHost, setIsSessionHost] = useState(false);
 
   const [companyName, setCompanyName] = useState("");
   const [tagline, setTagline] = useState("");
@@ -245,7 +304,7 @@ export default function SessionIdentityPage() {
 
       const { data: sessionData, error: sessionError } = await supabase
         .from("sessions")
-        .select("id,name,code,current_round")
+        .select("id,name,code,current_round,status,created_by")
         .eq("id", sessionId)
         .single();
 
@@ -286,9 +345,17 @@ export default function SessionIdentityPage() {
         return;
       }
 
+      const session = sessionData as SessionRow;
+      const activeRoundNumber = Math.max(session.current_round ?? 0, 1);
+
       const [{ data: roundData, error: roundError }, { data: memberRows, error: memberError }, { data: scenarioRows, error: scenarioError }] =
         await Promise.all([
-          supabase.from("session_rounds").select("status").eq("session_id", sessionId).eq("round_number", 1).maybeSingle(),
+          supabase
+            .from("session_rounds")
+            .select("status")
+            .eq("session_id", sessionId)
+            .eq("round_number", activeRoundNumber)
+            .maybeSingle(),
           supabase.from("team_memberships").select("user_id,team_role,is_team_lead").eq("team_id", team.id),
           supabase
             .from("project_scenarios")
@@ -302,7 +369,6 @@ export default function SessionIdentityPage() {
         return;
       }
 
-      const session = sessionData as SessionRow;
       const roundRow = (roundData as RoundStatusRow | null) ?? null;
       const profile = normalizeProfile(team.identity_profile);
       const meLabel =
@@ -340,8 +406,9 @@ export default function SessionIdentityPage() {
       setSelectedKpis(profile.kpi_targets ?? []);
       setPrimaryKpi(profile.primary_kpi ?? "");
       setStepIndex(resolveInitialStep(profile, team.scenario_id));
+      setIsSessionHost(session.created_by === user.id);
 
-      if (team.identity_completed || isIdentityWindowClosed(session.current_round ?? 0, roundRow?.status ?? null)) {
+      if (isSessionCompleted(session.status) || (team.identity_completed && session.created_by !== user.id)) {
         router.replace(`/sessions/${sessionId}`);
         return;
       }
@@ -349,6 +416,16 @@ export default function SessionIdentityPage() {
       setLoading(false);
     })();
   }, [router, sessionId, supabase]);
+
+  useEffect(() => {
+    if (!showSuccessScreen) return;
+
+    const redirectTimer = window.setTimeout(() => {
+      router.push(`/sessions/${sessionId}`);
+    }, 2000);
+
+    return () => window.clearTimeout(redirectTimer);
+  }, [router, sessionId, showSuccessScreen]);
 
   async function persistIdentityStep(
     profilePatch: Partial<IdentityProfile>,
@@ -429,7 +506,28 @@ export default function SessionIdentityPage() {
       { identity_completed: true },
       "Identity locked in."
     );
-    if (saved) router.push(`/sessions/${sessionId}`);
+    if (saved) setShowSuccessScreen(true);
+  }
+
+  async function handleResetIdentity() {
+    if (!isSessionHost || !teamId) return;
+
+    setResettingIdentity(true);
+    setSaveError("");
+    setSaveNotice("");
+
+    const { error: resetError } = await supabase
+      .from("teams")
+      .update({ identity_completed: false, identity_profile: {} })
+      .eq("id", teamId);
+
+    if (resetError) {
+      setSaveError(resetError.message);
+      setResettingIdentity(false);
+      return;
+    }
+
+    window.location.reload();
   }
 
   function toggleKpi(value: string) {
@@ -446,8 +544,10 @@ export default function SessionIdentityPage() {
     });
   }
 
-  const progressPercent = ((stepIndex + 1) / STEP_TITLES.length) * 100;
   const selectedScenario = scenarios.find((scenario) => scenario.id === selectedScenarioId) ?? null;
+  const selectedScenarioType = selectedScenario ? getScenarioTypeMeta(selectedScenario.name) : null;
+  const selectedPositioningOption = POSITIONING_OPTIONS.find((option) => option.value === positioningStrategy) ?? null;
+  const selectedKpiOptions = KPI_OPTIONS.filter((option) => selectedKpis.includes(option.title));
 
   if (loading) {
     return (
@@ -479,46 +579,23 @@ export default function SessionIdentityPage() {
                 <div className="rounded-full border border-amber-400/20 bg-amber-500/10 px-4 py-2 text-xs font-bold uppercase tracking-[0.22em] text-amber-100">
                   Round {Math.max(currentRound, 1)} {roundStatus ? `| ${roundStatus}` : ""}
                 </div>
-                <Link
-                  href={`/sessions/${sessionId}`}
-                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-bold uppercase tracking-[0.22em] text-slate-300 transition hover:border-white/20 hover:bg-white/10 hover:text-white"
-                >
-                  Exit
-                </Link>
+                {!showSuccessScreen ? (
+                  <Link
+                    href={`/sessions/${sessionId}`}
+                    className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-bold uppercase tracking-[0.22em] text-slate-300 transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+                  >
+                    Exit
+                  </Link>
+                ) : null}
               </div>
             </div>
 
             {error ? <Alert variant="error">{error}</Alert> : null}
 
-            <Card className="border-white/10 bg-slate-950/85">
-              <CardBody className="space-y-5 px-6 py-6">
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                  <div>
-                    <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-300">Round 1 Readiness</div>
-                    <div className="mt-2 text-xl font-bold text-white">{STEP_TITLES[stepIndex]}</div>
-                  </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-right">
-                    <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-500">Progress</div>
-                    <div className="mt-1 text-lg font-black text-white">{stepIndex + 1}/4</div>
-                  </div>
-                </div>
+            {!showSuccessScreen ? <StepRail currentStep={stepIndex} /> : null}
 
-                <div className="h-2 overflow-hidden rounded-full bg-white/5">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-amber-400 via-orange-400 to-rose-400 transition-all duration-500"
-                    style={{ width: `${progressPercent}%` }}
-                  />
-                </div>
-
-                <div className="grid gap-3 lg:grid-cols-4">
-                  {STEP_TITLES.map((title, index) => (
-                    <StepChip key={title} active={stepIndex === index} complete={stepCompletion[index]} index={index} title={title} />
-                  ))}
-                </div>
-              </CardBody>
-            </Card>
-
-            <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
+            {!showSuccessScreen ? (
+              <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
               <div className="space-y-6">
                 <Card className="border-white/10 bg-slate-950/80">
                   <CardBody className="space-y-4 px-6 py-6">
@@ -530,14 +607,18 @@ export default function SessionIdentityPage() {
                       </div>
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-                      <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">Scenario</div>
+                      <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">Project</div>
                       <div className="mt-2 text-sm font-medium text-slate-200">
-                        {selectedScenario ? `${selectedScenario.name} | ${selectedScenario.client}` : "Pending"}
+                        {selectedScenario && selectedScenarioType
+                          ? `${selectedScenarioType.icon} ${selectedScenario.name} | ${selectedScenario.client}`
+                          : "Pending"}
                       </div>
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
                       <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">Strategy</div>
-                      <div className="mt-2 text-sm font-medium text-slate-200">{positioningStrategy || "Pending"}</div>
+                      <div className="mt-2 text-sm font-medium text-slate-200">
+                        {selectedPositioningOption ? `${selectedPositioningOption.icon} ${selectedPositioningOption.title}` : "Pending"}
+                      </div>
                     </div>
                     <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
                       <div className="flex items-center justify-between">
@@ -553,7 +634,7 @@ export default function SessionIdentityPage() {
 
                 <Card className="border-white/10 bg-slate-950/80">
                   <CardBody className="space-y-3 px-6 py-6">
-                    {["Profile", "Scenario", "Positioning", "Targets"].map((label, index) => (
+                    {STEP_SHORT_LABELS.map((label, index) => (
                       <div key={label} className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
                         <span className="text-sm text-slate-300">{label}</span>
                         <span
@@ -671,49 +752,52 @@ export default function SessionIdentityPage() {
                         <div className="grid gap-5 xl:grid-cols-2">
                           {scenarios.map((scenario) => {
                             const selected = selectedScenarioId === scenario.id;
+                            const projectType = getScenarioTypeMeta(scenario.name);
                             return (
                               <button
                                 key={scenario.id}
                                 type="button"
                                 onClick={() => setSelectedScenarioId(scenario.id)}
-                                className={`overflow-hidden rounded-3xl border text-left transition ${
+                                className={`relative overflow-hidden rounded-3xl border text-left transition ${
                                   selected
-                                    ? "border-amber-400/40 bg-white/10 shadow-[0_24px_60px_rgba(251,191,36,0.12)]"
+                                    ? "border-amber-300 bg-white/10 shadow-[0_24px_60px_rgba(251,191,36,0.16)]"
                                     : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-white/5"
                                 }`}
                               >
+                                {selected ? (
+                                  <div className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full border border-amber-300/40 bg-amber-400 text-sm font-black text-white">
+                                    {"\u2713"}
+                                  </div>
+                                ) : null}
+
                                 <div className="border-b border-white/10 bg-gradient-to-br from-white/10 via-white/5 to-slate-950 px-5 py-5">
-                                  <div className="flex items-start justify-between gap-4">
-                                    <div>
-                                      <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">{scenario.client}</div>
-                                      <div className="mt-2 text-xl font-bold text-white">{scenario.name}</div>
+                                  <div className="flex items-start gap-4">
+                                    <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-slate-950/80 text-2xl">
+                                      {projectType.icon}
                                     </div>
+                                    <div className="min-w-0 pr-10">
+                                      <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">{projectType.label}</div>
+                                      <div className="mt-2 text-2xl font-black text-white">{scenario.name}</div>
+                                      <div className="mt-2 text-sm font-semibold text-slate-300">{scenario.client}</div>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="space-y-5 px-5 py-5">
+                                  <div className="flex flex-wrap gap-3">
+                                    <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-bold text-slate-100">
+                                      {formatBudget(scenario.base_budget_cr)}
+                                    </span>
+                                    <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-bold text-slate-100">
+                                      {scenario.duration_rounds ? `${scenario.duration_rounds} rounds` : "TBD duration"}
+                                    </span>
                                     <span
-                                      className={`rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] ${complexityClasses(
+                                      className={`rounded-full border px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] ${complexityClasses(
                                         scenario.complexity
                                       )}`}
                                     >
                                       {scenario.complexity}
                                     </span>
-                                  </div>
-                                </div>
-
-                                <div className="space-y-5 px-5 py-5">
-                                  <div className="grid grid-cols-3 gap-3">
-                                    <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-                                      <div className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">Budget</div>
-                                      <div className="mt-2 text-sm font-semibold text-white">{formatBudget(scenario.base_budget_cr)}</div>
-                                    </div>
-                                    <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-                                      <div className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">Duration</div>
-                                      <div className="mt-2 text-sm font-semibold text-white">
-                                        {scenario.duration_rounds ? `${scenario.duration_rounds} Rounds` : "TBD"}
-                                      </div>
-                                    </div>
-                                    <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-                                      <div className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">Brief</div>
-                                      <div className="mt-2 text-sm font-semibold text-white">{selected ? "Selected" : "Open"}</div>
-                                    </div>
                                   </div>
 
                                   <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4 text-sm leading-6 text-slate-300">
@@ -742,26 +826,32 @@ export default function SessionIdentityPage() {
                                 key={option.value}
                                 type="button"
                                 onClick={() => setPositioningStrategy(option.value)}
-                                className={`rounded-3xl border bg-gradient-to-b p-5 text-left transition ${
+                                className={`flex min-h-[320px] flex-col rounded-3xl border bg-gradient-to-b p-6 text-left transition ${
                                   selected
-                                    ? "border-amber-400/40 shadow-[0_22px_50px_rgba(251,191,36,0.12)]"
+                                    ? "border-amber-300 shadow-[0_22px_50px_rgba(251,191,36,0.16)]"
                                     : "border-white/10 hover:border-white/20"
                                 } ${option.tone}`}
                               >
-                                <div className="flex items-center justify-between gap-4">
-                                  <span className="rounded-full border border-white/10 bg-slate-950/70 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-300">
-                                    Play
-                                  </span>
+                                <div className="flex items-start justify-between gap-4">
+                                  <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-slate-950/75 text-3xl">
+                                    {option.icon}
+                                  </div>
                                   <span
                                     className={`rounded-full px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] ${
-                                      selected ? "bg-amber-500/15 text-amber-100" : "bg-white/5 text-slate-500"
+                                      selected ? "bg-amber-400 text-white" : "bg-white/5 text-slate-400"
                                     }`}
                                   >
                                     {selected ? "Selected" : "Open"}
                                   </span>
                                 </div>
-                                <div className="mt-8 text-xl font-bold text-white">{option.title}</div>
+
+                                <div className="mt-8 text-2xl font-black text-white">{option.title}</div>
                                 <div className="mt-3 text-sm leading-6 text-slate-200">{option.subtitle}</div>
+
+                                <div className="mt-auto rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
+                                  <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">Strategic Trade-off</div>
+                                  <div className="mt-2 text-sm font-semibold text-slate-100">{option.tradeoff}</div>
+                                </div>
                               </button>
                             );
                           })}
@@ -778,7 +868,9 @@ export default function SessionIdentityPage() {
 
                         <div className="rounded-3xl border border-white/10 bg-white/5 px-5 py-4">
                           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                            <div className="text-sm font-semibold text-white">Pick exactly 3 KPI targets. One primary KPI earns 4x points.</div>
+                            <div className="text-sm font-semibold text-white">
+                              Pick exactly 3 KPI targets. Then choose the one KPI that defines your win condition.
+                            </div>
                             <div className="rounded-full border border-white/10 bg-slate-950/70 px-3 py-2 text-xs font-bold uppercase tracking-[0.2em] text-slate-300">
                               {selectedKpis.length}/3 selected
                             </div>
@@ -786,109 +878,179 @@ export default function SessionIdentityPage() {
                         </div>
 
                         <div className="grid gap-5 xl:grid-cols-2">
-                          {KPI_OPTIONS.map(([title, description]) => {
-                            const selected = selectedKpis.includes(title);
-                            const primary = primaryKpi === title;
+                          {KPI_OPTIONS.map((option) => {
+                            const selected = selectedKpis.includes(option.title);
+                            const primary = primaryKpi === option.title;
                             const limitReached = selectedKpis.length >= 3 && !selected;
 
                             return (
                               <div
-                                key={title}
+                                key={option.title}
                                 role="button"
                                 tabIndex={0}
                                 onClick={() => {
                                   if (limitReached) return;
-                                  toggleKpi(title);
+                                  toggleKpi(option.title);
                                 }}
                                 onKeyDown={(event) => {
                                   if (event.key !== "Enter" && event.key !== " ") return;
                                   event.preventDefault();
                                   if (limitReached) return;
-                                  toggleKpi(title);
+                                  toggleKpi(option.title);
                                 }}
                                 className={`rounded-3xl border p-5 text-left transition focus:outline-none focus:ring-2 focus:ring-amber-400/40 ${
-                                  selected
-                                    ? "border-amber-400/40 bg-white/10 shadow-[0_18px_45px_rgba(251,191,36,0.08)]"
-                                    : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-white/5"
+                                  primary
+                                    ? "border-amber-300 bg-amber-500/10 shadow-[0_18px_45px_rgba(251,191,36,0.08)]"
+                                    : selected
+                                      ? "border-amber-400/40 bg-white/10 shadow-[0_18px_45px_rgba(251,191,36,0.08)]"
+                                      : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-white/5"
                                 } ${limitReached ? "opacity-60" : ""}`}
                               >
                                 <div className="flex items-start justify-between gap-4">
-                                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-300">
-                                    KPI
-                                  </span>
+                                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-2xl">
+                                    {option.icon}
+                                  </div>
                                   <span
                                     className={`rounded-full px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] ${
-                                      selected ? "bg-amber-500/15 text-amber-100" : "bg-white/5 text-slate-500"
+                                      primary
+                                        ? "bg-amber-400 text-white"
+                                        : selected
+                                          ? "bg-amber-500/15 text-amber-100"
+                                          : "bg-white/5 text-slate-500"
                                     }`}
                                   >
-                                    {selected ? "Selected" : "Open"}
+                                    {primary ? "Primary" : selected ? "Selected" : "Open"}
                                   </span>
                                 </div>
 
-                                <div className="mt-6 text-lg font-bold text-white">{title}</div>
-                                <div className="mt-2 text-sm text-slate-300">{description}</div>
-
-                                <div className="mt-5 flex flex-wrap items-center gap-3">
-                                  {primary ? (
-                                    <span className="rounded-full border border-amber-300/30 bg-amber-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] text-amber-100">
-                                      Primary x4
-                                    </span>
-                                  ) : null}
-                                  {selected ? (
-                                    <button
-                                      type="button"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        setPrimaryKpi(title);
-                                      }}
-                                      className={`rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] transition ${
-                                        primary
-                                          ? "border-amber-300/30 bg-amber-500/10 text-amber-100"
-                                          : "border-white/10 bg-slate-950/70 text-slate-200 hover:border-white/20 hover:text-white"
-                                      }`}
-                                    >
-                                      {primary ? "Primary KPI" : "Make Primary"}
-                                    </button>
-                                  ) : null}
-                                </div>
+                                <div className="mt-6 text-lg font-bold text-white">{option.title}</div>
+                                <div className="mt-2 text-sm text-slate-300">{option.description}</div>
                               </div>
                             );
                           })}
                         </div>
+
+                        {selectedKpiOptions.length === 3 ? (
+                          <div className="rounded-3xl border border-amber-300/20 bg-gradient-to-br from-amber-500/10 via-slate-950/80 to-slate-950 p-5">
+                            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                              <div>
+                                <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-300">
+                                  Choose your Primary KPI
+                                </div>
+                                <div className="mt-2 text-sm text-slate-200">
+                                  Only one KPI gets the 4x scoring multiplier for your team.
+                                </div>
+                              </div>
+                              <div className="rounded-full border border-white/10 bg-slate-950/80 px-3 py-2 text-xs font-bold uppercase tracking-[0.2em] text-slate-300">
+                                3 finalists
+                              </div>
+                            </div>
+
+                            <div className="mt-5 grid gap-4 lg:grid-cols-3">
+                              {selectedKpiOptions.map((option) => {
+                                const primary = primaryKpi === option.title;
+
+                                return (
+                                  <button
+                                    key={option.title}
+                                    type="button"
+                                    onClick={() => setPrimaryKpi(option.title)}
+                                    className={`rounded-3xl border p-5 text-left transition ${
+                                      primary
+                                        ? "border-yellow-300 bg-yellow-500/10 shadow-[0_18px_45px_rgba(250,204,21,0.12)]"
+                                        : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-white/5"
+                                    }`}
+                                  >
+                                    <div className="flex items-start justify-between gap-4">
+                                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-2xl">
+                                        {option.icon}
+                                      </div>
+                                      {primary ? (
+                                        <span className="rounded-full border border-yellow-300/50 bg-yellow-400 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-slate-950">
+                                          {"\u2B50"} Primary — 4x points
+                                        </span>
+                                      ) : null}
+                                    </div>
+
+                                    <div className="mt-5 text-base font-black text-white">{option.title}</div>
+                                    <div className="mt-2 text-sm text-slate-300">{option.description}</div>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
 
                     {saveError ? <Alert variant="error">{saveError}</Alert> : null}
                     {saveNotice ? <Alert variant="success">{saveNotice}</Alert> : null}
 
-                    <div className="flex flex-col gap-4 border-t border-white/10 pt-6 sm:flex-row sm:items-center sm:justify-between">
-                      <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">
-                        {stepIndex === 3 ? "Final step" : `Up next | ${STEP_TITLES[stepIndex + 1]}`}
+                    <div className="space-y-4 border-t border-white/10 pt-6">
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">
+                          {stepIndex === 3 ? "Final step" : `Up next | ${STEP_TITLES[stepIndex + 1]}`}
+                        </div>
+
+                        <div className="flex flex-col gap-3 sm:flex-row">
+                          <Button
+                            variant="ghost"
+                            onClick={() => setStepIndex((current) => Math.max(0, current - 1) as StepIndex)}
+                            disabled={stepIndex === 0 || saving || resettingIdentity}
+                            className="h-11 rounded-2xl border border-white/10 bg-white/5 px-5 text-slate-200 hover:border-white/20"
+                          >
+                            Back
+                          </Button>
+
+                          <Button
+                            onClick={handleContinue}
+                            disabled={saving || resettingIdentity}
+                            className="h-11 rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 px-5 text-slate-950 shadow-[0_12px_28px_rgba(249,115,22,0.28)] hover:from-amber-300 hover:to-orange-400"
+                          >
+                            {saving ? "Saving..." : stepIndex === 3 ? "Complete Setup" : "Save & Continue"}
+                          </Button>
+                        </div>
                       </div>
 
-                      <div className="flex flex-col gap-3 sm:flex-row">
-                        <Button
-                          variant="ghost"
-                          onClick={() => setStepIndex((current) => Math.max(0, current - 1) as StepIndex)}
-                          disabled={stepIndex === 0 || saving}
-                          className="h-11 rounded-2xl border border-white/10 bg-white/5 px-5 text-slate-200 hover:border-white/20"
-                        >
-                          Back
-                        </Button>
-
-                        <Button
-                          onClick={handleContinue}
-                          disabled={saving}
-                          className="h-11 rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 px-5 text-slate-950 shadow-[0_12px_28px_rgba(249,115,22,0.28)] hover:from-amber-300 hover:to-orange-400"
-                        >
-                          {saving ? "Saving..." : stepIndex === 3 ? "Complete Setup" : "Save & Continue"}
-                        </Button>
-                      </div>
+                      {isSessionHost ? (
+                        <div className="flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => void handleResetIdentity()}
+                            disabled={saving || resettingIdentity}
+                            className="text-xs font-medium text-slate-500 underline decoration-slate-700 underline-offset-4 transition hover:text-amber-200 disabled:cursor-not-allowed disabled:no-underline disabled:opacity-60"
+                          >
+                            {resettingIdentity ? "Resetting company profile..." : "Reset company profile"}
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </CardBody>
               </Card>
             </div>
+            ) : (
+              <Card className="border-amber-300/20 bg-gradient-to-br from-slate-950 via-slate-950 to-amber-950/30">
+                <CardBody className="px-6 py-10">
+                  <div className="mx-auto flex max-w-3xl flex-col items-center text-center">
+                    <div className="text-[11px] font-bold uppercase tracking-[0.3em] text-amber-300">Setup Complete</div>
+                    <div className="mt-6 text-4xl font-black text-white sm:text-5xl">{companyName.trim() || teamName}</div>
+                    <div className="mt-3 text-xl font-semibold text-slate-200">
+                      Welcome to {selectedScenario?.name || "your project"}
+                    </div>
+                    <div className="relative mt-10 flex h-28 w-28 items-center justify-center">
+                      <div className="absolute inset-0 rounded-full border-4 border-white/10 border-t-amber-300 animate-spin" />
+                      <div className="flex h-20 w-20 items-center justify-center rounded-full border border-amber-300/30 bg-amber-500/10 text-3xl text-white">
+                        {"\u2713"}
+                      </div>
+                    </div>
+                    <div className="mt-8 max-w-xl text-sm leading-7 text-slate-300">
+                      Your operating identity is locked in. We&apos;re opening the session command floor and loading the project context now.
+                    </div>
+                  </div>
+                </CardBody>
+              </Card>
+            )}
           </div>
         </div>
       </Page>

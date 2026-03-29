@@ -34,7 +34,7 @@ export default function PlayerHUD() {
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-white/10 bg-slate-950/80 px-4 py-3 backdrop-blur-md sm:px-6">
-      <div className="mx-auto flex w-full max-w-[1180px] items-center justify-between gap-4">
+      <div className="flex w-full items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 shadow-sm shadow-blue-500/20">
             <span className="text-sm font-bold text-white">BI</span>

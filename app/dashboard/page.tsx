@@ -22,7 +22,18 @@ type SessionRow = {
   round_count: number;
 };
 type MembershipRow = { team_id: string };
-type TeamRow = { id: string; session_id: string; team_name: string; total_points: number };
+type TeamRow = {
+  id: string;
+  session_id: string;
+  team_name: string;
+  total_points: number;
+  identity_completed: boolean;
+};
+
+function isSessionCompleted(status: string | null | undefined) {
+  const normalized = status?.toLowerCase();
+  return normalized === "complete" || normalized === "completed";
+}
 
 function makeSessionCode() {
   const part = Math.random().toString(36).slice(2, 8).toUpperCase();
@@ -84,7 +95,7 @@ export default function DashboardPage() {
 
     const { data: teams, error: teamErr } = await supabase
       .from("teams")
-      .select("id,session_id,team_name,total_points")
+      .select("id,session_id,team_name,total_points,identity_completed")
       .in("id", teamIds);
 
     if (teamErr) {
@@ -238,7 +249,7 @@ export default function DashboardPage() {
     }
   }
 
-  const activeMissions = mySessions.filter((m) => m.session.status !== "complete");
+  const activeMissions = mySessions.filter((m) => !isSessionCompleted(m.session.status));
   const sortedLeaderboard = [...mySessions].sort((a, b) => b.team.total_points - a.team.total_points);
 
   return (
@@ -292,6 +303,15 @@ export default function DashboardPage() {
                         <div className="flex items-center gap-3">
                           <div className="h-3 w-3 animate-pulse rounded-full bg-blue-500" />
                           <h3 className="text-lg font-bold text-white">{session.name ?? "Classified Mission"}</h3>
+                          <span
+                            className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${
+                              team.identity_completed
+                                ? "border border-emerald-400/25 bg-emerald-500/10 text-emerald-200"
+                                : "border border-amber-400/25 bg-amber-500/10 text-amber-200"
+                            }`}
+                          >
+                            {team.identity_completed ? "Ready" : "Setup Pending"}
+                          </span>
                         </div>
                         <div className="mt-2 flex items-center gap-4 text-xs font-medium text-slate-400">
                           <span className="flex items-center gap-1">

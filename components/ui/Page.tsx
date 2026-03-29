@@ -1,7 +1,7 @@
 import * as React from "react";
 
 export function Page({ children }: { children: React.ReactNode }) {
-  return <div className="mx-auto w-full max-w-[1160px] p-1 sm:p-2">{children}</div>;
+  return <div className="w-full p-1 sm:p-2">{children}</div>;
 }
 
 export function PageTitle({ children }: { children: React.ReactNode }) {

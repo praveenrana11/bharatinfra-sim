@@ -72,10 +72,6 @@ type SessionRoundRow = {
   news_payload: unknown;
 };
 
-type SessionRoundStatusRow = {
-  status: string | null;
-};
-
 const DEFAULT_ROUND_WINDOW_MINUTES = 35;
 const LATE_PENALTY_PER_MINUTE = 2;
 const LATE_PENALTY_CAP = 80;
@@ -129,6 +125,11 @@ function parseRoundEvents(payload: unknown): ConstructionEvent[] | null {
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
+}
+
+function isSessionCompleted(status: string | null | undefined) {
+  const normalized = status?.toLowerCase();
+  return normalized === "complete" || normalized === "completed";
 }
 
 function computeLatePenalty(deadlineIso: string | null, submittedIso: string) {
@@ -295,25 +296,9 @@ export default function SessionPage() {
       setPoints(myTeam.total_points ?? 0);
       setTeamKpi(myTeam.kpi_target ?? "Not selected");
 
-      if (!myTeam.identity_completed && (session.current_round ?? 0) === 1) {
-        const { data: currentRoundData, error: currentRoundErr } = await supabase
-          .from("session_rounds")
-          .select("status")
-          .eq("session_id", sessionId)
-          .eq("round_number", 1)
-          .maybeSingle();
-
-        if (currentRoundErr) {
-          setError(currentRoundErr.message);
-          setLoading(false);
-          return;
-        }
-
-        const currentRoundState = currentRoundData as SessionRoundStatusRow | null;
-        if (currentRoundState?.status && ["pending", "open"].includes(currentRoundState.status)) {
-          router.replace(`/sessions/${sessionId}/identity`);
-          return;
-        }
+      if (!myTeam.identity_completed && !isSessionCompleted(session.status)) {
+        router.replace(`/sessions/${sessionId}/identity`);
+        return;
       }
 
       const { data: lastResultData, error: rErr } = await supabase
@@ -888,7 +873,7 @@ async function autoCloseRoundWithAutolock(closeIso: string): Promise<AutoCloseSu
 
   return (
     <RequireAuth>
-      <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
+      <div className="flex w-full flex-col gap-6 lg:flex-row lg:items-start">
         {/* Main Content (Missions / Stepper) */}
         <div className="flex-1 space-y-6">
           <div className="flex items-center justify-between">
