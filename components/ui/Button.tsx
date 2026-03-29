@@ -1,36 +1,55 @@
 import * as React from "react";
+import { cn } from "@/lib/cn";
 
-type ButtonVariant = "primary" | "secondary" | "ghost";
+type ButtonVariant = "primary" | "secondary" | "danger" | "ghost" | "amber";
+type ButtonSize = "sm" | "md" | "lg";
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: ButtonVariant;
+  size?: ButtonSize;
   asChild?: boolean;
 };
 
-export function Button({
-  variant = "primary",
-  className = "",
-  asChild,
-  children,
-  ...props
-}: ButtonProps) {
+const variantClasses: Record<ButtonVariant, string> = {
+  primary:
+    "border border-brand-primary bg-brand-primary text-white shadow-sm hover:border-brand-secondary hover:bg-brand-secondary",
+  secondary:
+    "border-2 border-brand-primary bg-transparent text-brand-primary hover:bg-brand-primary hover:text-white",
+  danger:
+    "border border-brand-danger bg-brand-danger text-white shadow-sm hover:border-red-600 hover:bg-red-600",
+  ghost:
+    "border border-transparent bg-transparent text-brand-muted shadow-none hover:bg-gray-100 hover:text-brand-dark",
+  amber:
+    "border border-brand-accent bg-brand-accent text-white shadow-sm hover:border-amber-600 hover:bg-amber-600",
+};
+
+const sizeClasses: Record<ButtonSize, string> = {
+  sm: "px-3 py-1.5 text-sm",
+  md: "px-5 py-2.5 text-sm",
+  lg: "px-6 py-3 text-base",
+};
+
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { variant = "primary", size = "md", className, asChild, type = "button", children, ...props },
+  ref
+) {
   void asChild;
 
-  const base =
-    "inline-flex items-center justify-center rounded-xl border px-4 py-2 text-sm font-bold uppercase tracking-wide transition-all " +
-    "disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50";
-
-  const styles: Record<ButtonVariant, string> = {
-    primary:
-      "border-blue-700 bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-[0_8px_20px_rgba(37,99,235,0.3)] hover:-translate-y-[1px] hover:from-blue-500 hover:to-indigo-500 active:scale-95",
-    secondary:
-      "border-slate-700 bg-slate-900 text-slate-300 shadow-sm hover:-translate-y-[1px] hover:border-slate-600 hover:bg-slate-800 hover:text-white active:scale-95",
-    ghost: "border-transparent bg-transparent text-slate-400 hover:bg-white/10 hover:text-white",
-  };
-
   return (
-    <button className={`${base} ${styles[variant]} ${className}`} {...props}>
+    <button
+      ref={ref}
+      type={type}
+      className={cn(
+        "inline-flex items-center justify-center gap-2 rounded-lg font-semibold transition-all duration-150",
+        "focus:outline-none focus:ring-2 focus:ring-brand-primary focus:ring-offset-2",
+        "disabled:pointer-events-none disabled:opacity-50",
+        variantClasses[variant],
+        sizeClasses[size],
+        className
+      )}
+      {...props}
+    >
       {children}
     </button>
   );
-}
+});

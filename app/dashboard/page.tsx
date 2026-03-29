@@ -5,12 +5,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
 import { getSupabaseClient } from "@/lib/supabaseClient";
-import { Page, PageTitle, PageSubTitle } from "@/components/ui/Page";
-import { Card, CardBody, CardHeader } from "@/components/ui/Card";
+import { Page } from "@/components/ui/Page";
+import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Alert } from "@/components/ui/Alert";
 import { Label } from "@/components/ui/Label";
 import { Input } from "@/components/ui/Input";
+import { Badge } from "@/components/ui/Badge";
+import { MetricTile } from "@/components/ui/MetricTile";
 
 type Scenario = { id: string; name: string; description: string | null };
 type SessionRow = {
@@ -30,6 +32,12 @@ type TeamRow = {
   identity_completed: boolean;
 };
 
+type SessionCardRow = {
+  session: SessionRow;
+  team: TeamRow;
+  teamCount: number;
+};
+
 function isSessionCompleted(status: string | null | undefined) {
   const normalized = status?.toLowerCase();
   return normalized === "complete" || normalized === "completed";
@@ -46,22 +54,97 @@ function makePendingTeamName(email: string | null | undefined) {
   return `${localPart} Team`;
 }
 
+function toDisplayName(value: string) {
+  return value
+    .split(/[\s._-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function resolveFirstName(email: string | null | undefined, userMeta: Record<string, unknown> | undefined) {
+  const firstName =
+    (typeof userMeta?.first_name === "string" && userMeta.first_name) ||
+    (typeof userMeta?.name === "string" && userMeta.name.split(" ")[0]) ||
+    (typeof userMeta?.full_name === "string" && userMeta.full_name.split(" ")[0]) ||
+    email?.split("@")[0] ||
+    "Builder";
+
+  return toDisplayName(firstName);
+}
+
+function formatSessionStatus(status: string) {
+  if (status === "in_progress") return "In Progress";
+  if (status === "pending") return "Pending";
+  if (status === "complete" || status === "completed") return "Completed";
+  return toDisplayName(status);
+}
+
+function getSessionStatusTone(status: string) {
+  if (status === "in_progress") return "info" as const;
+  if (status === "pending") return "warning" as const;
+  if (status === "complete" || status === "completed") return "success" as const;
+  return "neutral" as const;
+}
+
+function DashboardModal({
+  open,
+  title,
+  description,
+  onClose,
+  children,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm">
+      <div className="w-full max-w-xl rounded-[28px] border border-white/10 bg-gradient-to-br from-slate-900 via-slate-950 to-slate-950 shadow-[0_35px_120px_rgba(15,23,42,0.45)]">
+        <div className="flex items-start justify-between border-b border-white/10 px-6 py-5">
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-300">Session Workspace</div>
+            <h2 className="mt-2 text-2xl font-black text-white">{title}</h2>
+            <p className="mt-2 text-sm text-slate-300">{description}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close modal"
+            className="rounded-full border border-white/10 p-2 text-slate-400 transition hover:border-white/20 hover:text-white"
+          >
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+        <div className="px-6 py-6">{children}</div>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const supabase = useMemo(() => getSupabaseClient(), []);
-  const [email, setEmail] = useState<string>("");
 
+  const [firstName, setFirstName] = useState("Builder");
+  const [email, setEmail] = useState("");
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
-  const [mySessions, setMySessions] = useState<Array<{ session: SessionRow; team: TeamRow }>>([]);
-
+  const [mySessions, setMySessions] = useState<SessionCardRow[]>([]);
   const [creating, setCreating] = useState(false);
   const [joining, setJoining] = useState(false);
-  const [error, setError] = useState<string>("");
-
-  const [scenarioId, setScenarioId] = useState<string>("");
-  const [sessionName, setSessionName] = useState<string>("");
-  const [roundCount, setRoundCount] = useState<number>(4);
-  const [joinCode, setJoinCode] = useState<string>("");
+  const [error, setError] = useState("");
+  const [scenarioId, setScenarioId] = useState("");
+  const [sessionName, setSessionName] = useState("");
+  const [roundCount] = useState(4);
+  const [joinCode, setJoinCode] = useState("");
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showJoinModal, setShowJoinModal] = useState(false);
 
   async function loadAll() {
     setError("");
@@ -69,6 +152,7 @@ export default function DashboardPage() {
     if (userErr || !userData.user) return;
 
     setEmail(userData.user.email ?? "");
+    setFirstName(resolveFirstName(userData.user.email, userData.user.user_metadata));
 
     const { data: scenarioData, error: scenarioErr } = await supabase
       .from("scenarios")
@@ -124,22 +208,50 @@ export default function DashboardPage() {
       return;
     }
 
+    const { data: allSessionTeams, error: sessionTeamsErr } = await supabase
+      .from("teams")
+      .select("session_id")
+      .in("session_id", sessionIds);
+
+    if (sessionTeamsErr) {
+      setError(sessionTeamsErr.message);
+      setMySessions([]);
+      return;
+    }
+
     const sessionRows = (sessions ?? []) as SessionRow[];
     const byId = new Map<string, SessionRow>(sessionRows.map((row) => [row.id, row]));
+    const sessionCounts = new Map<string, number>();
+
+    for (const row of (allSessionTeams ?? []) as Array<{ session_id: string }>) {
+      sessionCounts.set(row.session_id, (sessionCounts.get(row.session_id) ?? 0) + 1);
+    }
 
     const merged = teamRows
       .map((team) => {
         const session = byId.get(team.session_id);
         if (!session) return null;
-        return { session, team };
+
+        return {
+          session,
+          team,
+          teamCount: sessionCounts.get(team.session_id) ?? 1,
+        };
       })
-      .filter(Boolean) as Array<{ session: SessionRow; team: TeamRow }>;
+      .filter(Boolean) as SessionCardRow[];
+
+    merged.sort((left, right) => {
+      const leftIsPending = left.team.identity_completed ? 1 : 0;
+      const rightIsPending = right.team.identity_completed ? 1 : 0;
+      if (leftIsPending !== rightIsPending) return rightIsPending - leftIsPending;
+      return (left.session.name ?? "").localeCompare(right.session.name ?? "");
+    });
 
     setMySessions(merged);
   }
 
   useEffect(() => {
-    loadAll();
+    void loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -223,7 +335,7 @@ export default function DashboardPage() {
       }
 
       const code = joinCode.trim().toUpperCase();
-      if (!code) throw new Error("Enter a session code (e.g., BI-8F2KQZ)");
+      if (!code) throw new Error("Enter a session code (for example BI-8F2KQZ).");
 
       const { data: session, error: sessionErr } = await supabase
         .from("sessions")
@@ -261,176 +373,219 @@ export default function DashboardPage() {
     }
   }
 
-  const activeMissions = mySessions.filter((m) => !isSessionCompleted(m.session.status));
-  const sortedLeaderboard = [...mySessions].sort((a, b) => b.team.total_points - a.team.total_points);
+  const activeSessions = mySessions.filter((entry) => !isSessionCompleted(entry.session.status));
 
   return (
     <RequireAuth>
       <Page>
-        <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
-          <div>
-            <PageTitle>The Arena</PageTitle>
-            <PageSubTitle>Operative: {email || "-"}</PageSubTitle>
-          </div>
-
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
-            <div className="flex gap-4">
-              <div className="flex flex-col items-center justify-center rounded-lg border border-white/10 bg-slate-900/50 px-6 py-2">
-                <span className="text-xs font-bold uppercase tracking-widest text-slate-500">Total XP</span>
-                <span className="text-xl font-black text-blue-400">
-                  {mySessions.reduce((acc, curr) => acc + curr.team.total_points, 0)}
-                </span>
-              </div>
-              <div className="flex flex-col items-center justify-center rounded-lg border border-white/10 bg-slate-900/50 px-6 py-2">
-                <span className="text-xs font-bold uppercase tracking-widest text-slate-500">Global Rank</span>
-                <span className="text-xl font-black text-emerald-400">#42</span>
-              </div>
+        <div className="space-y-8">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <h1 className="text-heading-1 text-white">Welcome back, {firstName}</h1>
+              <p className="text-body mt-3 text-brand-muted">Your active simulation sessions</p>
+              <button
+                type="button"
+                onClick={() => setShowJoinModal(true)}
+                className="mt-4 text-sm font-semibold text-amber-300 transition hover:text-amber-200"
+              >
+                Join with a session code
+              </button>
             </div>
+
+            <Button
+              size="lg"
+              onClick={() => setShowCreateModal(true)}
+              className="rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 shadow-[0_14px_30px_rgba(249,115,22,0.28)] hover:from-amber-300 hover:to-orange-400"
+            >
+              Create New Session
+            </Button>
           </div>
-        </div>
 
-        {error ? (
-          <Alert variant="error" className="mt-6">
-            {error}
-          </Alert>
-        ) : null}
+          {error ? <Alert variant="error">{error}</Alert> : null}
 
-        <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-12">
-          {/* LEFT COL: ACTIVE MISSIONS & JOIN */}
-          <div className="space-y-6 lg:col-span-8">
-            <Card>
-              <CardHeader title="Active Missions" subtitle="Missions requiring your immediate strategic input." />
-              <CardBody className="space-y-4">
-                {activeMissions.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-slate-700 bg-slate-900/50 p-8 text-center text-sm text-slate-500">
-                    No active missions. Join or create one below.
-                  </div>
-                ) : (
-                  activeMissions.map(({ session, team }) => (
-                    <div
-                      key={`${session.id}-${team.id}`}
-                      className="group relative flex flex-col justify-between gap-4 rounded-xl border border-slate-700 bg-slate-900/40 p-5 transition-all hover:border-blue-500/50 hover:bg-slate-800/60 sm:flex-row sm:items-center"
-                    >
+          {activeSessions.length === 0 ? (
+            <Card variant="elevated" className="overflow-hidden">
+              <CardBody className="flex min-h-[420px] flex-col items-center justify-center px-6 py-12 text-center">
+                <div className="text-7xl leading-none">🏗️</div>
+                <h2 className="mt-8 text-heading-2 text-white">No active sessions</h2>
+                <p className="mt-4 max-w-xl text-body text-brand-muted">
+                  Ask your facilitator for a session code, or create one to get started.
+                </p>
+                <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+                  <Button
+                    variant="secondary"
+                    size="lg"
+                    onClick={() => setShowJoinModal(true)}
+                    className="rounded-2xl border-white/10 bg-white/5 px-6 text-white hover:border-white/20 hover:bg-white/10"
+                  >
+                    Join Session
+                  </Button>
+                  <Button
+                    size="lg"
+                    onClick={() => setShowCreateModal(true)}
+                    className="rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 px-6 text-slate-950 hover:from-amber-300 hover:to-orange-400"
+                  >
+                    Create Session
+                  </Button>
+                </div>
+              </CardBody>
+            </Card>
+          ) : (
+            <div className="grid gap-6 xl:grid-cols-2">
+              {activeSessions.map(({ session, team, teamCount }) => (
+                <Card
+                  key={`${session.id}-${team.id}`}
+                  variant="elevated"
+                  className="hover:-translate-y-1 hover:shadow-lg"
+                >
+                  <CardBody className="space-y-6 p-6">
+                    <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                       <div>
-                        <div className="flex items-center gap-3">
-                          <div className="h-3 w-3 animate-pulse rounded-full bg-blue-500" />
-                          <h3 className="text-lg font-bold text-white">{session.name ?? "Classified Mission"}</h3>
-                          <span
-                            className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${
-                              team.identity_completed
-                                ? "border border-emerald-400/25 bg-emerald-500/10 text-emerald-200"
-                                : "border border-amber-400/25 bg-amber-500/10 text-amber-200"
-                            }`}
-                          >
-                            {team.identity_completed ? "Ready" : "Setup Pending"}
-                          </span>
-                        </div>
-                        <div className="mt-2 flex items-center gap-4 text-xs font-medium text-slate-400">
-                          <span className="flex items-center gap-1">
-                            <span className="text-slate-500">CODE:</span> <span className="font-mono text-blue-300">{session.code}</span>
-                          </span>
-                          <span className="flex items-center gap-1">
-                            <span className="text-slate-500">PHASE:</span> <span className="text-emerald-400">{session.current_round}/{session.round_count}</span>
-                          </span>
-                        </div>
+                        <h2 className="text-heading-3 text-white">{session.name ?? "Untitled Session"}</h2>
+                        <div className="mt-2 text-sm text-slate-400">Code: {session.code}</div>
                       </div>
 
-                      <Link href={`/sessions/${session.id}`} className="shrink-0">
-                        <Button className="w-full sm:w-auto text-xs shadow-blue-500/20">RESUME MISSION</Button>
+                      <Badge tone={getSessionStatusTone(session.status)}>{formatSessionStatus(session.status)}</Badge>
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <MetricTile
+                        label="Current Round"
+                        value={`Round ${Math.max(session.current_round, 1)} of ${Math.max(session.round_count, 1)}`}
+                        helper={session.status === "pending" ? "Awaiting facilitator kickoff" : "Live simulation progress"}
+                        tone="info"
+                        valueClassName="text-base font-black tracking-tight text-white"
+                      />
+                      <MetricTile
+                        label="Teams"
+                        value={String(teamCount)}
+                        helper="Registered teams"
+                        tone="neutral"
+                      />
+                      <MetricTile
+                        label="Your Team"
+                        value={
+                          <Badge tone={team.identity_completed ? "success" : "warning"}>
+                            {team.identity_completed ? "Ready" : "Setup Pending"}
+                          </Badge>
+                        }
+                        helper={team.team_name}
+                        tone={team.identity_completed ? "success" : "warning"}
+                        valueClassName=""
+                      />
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <Link href={`/sessions/${session.id}`} className="block">
+                        <Button className="w-full rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 hover:from-amber-300 hover:to-orange-400">
+                          Enter Session
+                        </Button>
+                      </Link>
+                      <Link href={`/sessions/${session.id}/report`} className="block">
+                        <Button
+                          variant="ghost"
+                          className="w-full rounded-2xl border border-white/10 bg-white/5 text-white hover:border-white/20 hover:bg-white/10"
+                        >
+                          View Report
+                        </Button>
                       </Link>
                     </div>
-                  ))
-                )}
-              </CardBody>
-            </Card>
+                  </CardBody>
+                </Card>
+              ))}
+            </div>
+          )}
+        </div>
 
-            <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-              <Card>
-                <CardHeader title="Join by Code" subtitle="Enter a code from your Game Master." />
-                <CardBody className="space-y-4">
-                  <div>
-                    <Label htmlFor="joinCode" className="text-slate-400">Session Code</Label>
-                    <Input
-                      id="joinCode"
-                      placeholder="BI-XXXXXX"
-                      value={joinCode}
-                      onChange={(e) => setJoinCode(e.target.value)}
-                      className="font-mono uppercase"
-                    />
-                  </div>
-                  <Button variant="secondary" onClick={handleJoinByCode} disabled={joining} className="w-full">
-                    {joining ? "Joining..." : "Join Mission"}
-                  </Button>
-                </CardBody>
-              </Card>
+        <DashboardModal
+          open={showCreateModal}
+          title="Create session"
+          description="Set the session name and scenario, then we’ll create the host session and take you straight into the hub."
+          onClose={() => setShowCreateModal(false)}
+        >
+          <div className="space-y-5">
+            <div>
+              <Label htmlFor="sessionName">Session Name</Label>
+              <Input
+                id="sessionName"
+                placeholder="IIM Kozhikode Batch 2025 - Module 3"
+                value={sessionName}
+                onChange={(event) => setSessionName(event.target.value)}
+                className="mt-3 h-12 rounded-2xl border-white/10 bg-white/5 px-4 text-base"
+              />
+            </div>
 
-              <Card>
-                <CardHeader title="Create Mission" subtitle="Host a new simulation for your team." />
-                <CardBody className="space-y-4">
-                  <div>
-                    <Label htmlFor="sessionName" className="text-slate-400">Session Name</Label>
-                    <Input
-                      id="sessionName"
-                      placeholder="IIM Kozhikode Batch 2025 - Module 3"
-                      value={sessionName}
-                      onChange={(e) => setSessionName(e.target.value)}
-                    />
-                    <div className="mt-2 text-xs text-slate-500">
-                      Use a clear cohort or workshop name so participants can spot the right session quickly.
-                    </div>
-                  </div>
-                  <div>
-                    <Label htmlFor="scenario" className="text-slate-400">Scenario</Label>
-                    <select
-                      id="scenario"
-                      className="mt-1 block w-full rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm text-white shadow-inner focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-                      value={scenarioId}
-                      onChange={(e) => setScenarioId(e.target.value)}
-                    >
-                      {scenarios.map((scenario) => (
-                        <option key={scenario.id} value={scenario.id}>
-                          {scenario.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <Button variant="ghost" onClick={handleCreateSession} disabled={creating} className="w-full border border-slate-700">
-                    {creating ? "Creating..." : "Create Host Session"}
-                  </Button>
-                </CardBody>
-              </Card>
+            <div>
+              <Label htmlFor="scenario">Scenario</Label>
+              <select
+                id="scenario"
+                value={scenarioId}
+                onChange={(event) => setScenarioId(event.target.value)}
+                className="mt-3 h-12 w-full rounded-2xl border border-white/10 bg-white/5 px-4 text-base text-white outline-none transition focus:border-amber-400/40 focus:bg-white/10"
+              >
+                {scenarios.map((scenario) => (
+                  <option key={scenario.id} value={scenario.id} className="bg-slate-900">
+                    {scenario.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-3 border-t border-white/10 pt-5 sm:flex-row sm:justify-end">
+              <Button
+                variant="secondary"
+                onClick={() => setShowCreateModal(false)}
+                className="rounded-2xl border-white/10 bg-white/5 text-white hover:border-white/20 hover:bg-white/10"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={() => void handleCreateSession()}
+                disabled={creating}
+                className="rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 hover:from-amber-300 hover:to-orange-400"
+              >
+                {creating ? "Creating..." : "Create"}
+              </Button>
             </div>
           </div>
+        </DashboardModal>
 
-          {/* RIGHT COL: LEADERBOARD */}
-          <div className="lg:col-span-4">
-            <Card className="h-full">
-              <CardHeader title="Global Leaderboard" subtitle="Top performers across your network." />
-              <CardBody className="space-y-2">
-                {sortedLeaderboard.length === 0 ? (
-                  <div className="text-sm text-slate-500 text-center py-6">No ranked data available.</div>
-                ) : (
-                  sortedLeaderboard.map(({ session, team }, index) => (
-                    <div key={`${session.id}-${team.id}`} className="flex flex-col gap-1 rounded-lg border border-white/5 bg-slate-900/30 p-3">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${index === 0 ? 'bg-amber-500/20 text-amber-400' : index === 1 ? 'bg-slate-300/20 text-slate-300' : index === 2 ? 'bg-orange-700/20 text-orange-400' : 'bg-slate-800 text-slate-500'}`}>
-                            {index + 1}
-                          </span>
-                          <span className="font-semibold text-white text-sm">{team.team_name}</span>
-                        </div>
-                        <span className="font-mono text-sm font-bold text-blue-400">{team.total_points}</span>
-                      </div>
-                      <div className="ml-8 text-[10px] uppercase tracking-wider text-slate-500 truncate">
-                        {session.name}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </CardBody>
-            </Card>
+        <DashboardModal
+          open={showJoinModal}
+          title="Join session"
+          description="Enter the session code shared by your facilitator and we’ll add you to the simulation."
+          onClose={() => setShowJoinModal(false)}
+        >
+          <div className="space-y-5">
+            <div>
+              <Label htmlFor="joinCode">Session Code</Label>
+              <Input
+                id="joinCode"
+                placeholder="BI-XXXXXX"
+                value={joinCode}
+                onChange={(event) => setJoinCode(event.target.value)}
+                className="mt-3 h-12 rounded-2xl border-white/10 bg-white/5 px-4 text-base uppercase"
+              />
+            </div>
+
+            <div className="flex flex-col gap-3 border-t border-white/10 pt-5 sm:flex-row sm:justify-end">
+              <Button
+                variant="secondary"
+                onClick={() => setShowJoinModal(false)}
+                className="rounded-2xl border-white/10 bg-white/5 text-white hover:border-white/20 hover:bg-white/10"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={() => void handleJoinByCode()}
+                disabled={joining}
+                className="rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 hover:from-amber-300 hover:to-orange-400"
+              >
+                {joining ? "Joining..." : "Join"}
+              </Button>
+            </div>
           </div>
-        </div>
+        </DashboardModal>
       </Page>
     </RequireAuth>
   );

@@ -4,8 +4,18 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
+import {
+  MetricTile as ResultsMetricTile,
+  PerformanceHistoryChart,
+  RadarComparisonChart,
+  ScoreGauge,
+  type ComparisonMetric,
+  type HistoryMetricRow,
+  type MetricTileModel,
+} from "@/components/results/ResultsVisuals";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
+import { MetricTile as StatTile } from "@/components/ui/MetricTile";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { buildDeterministicRoundDebrief } from "@/lib/aiDebrief";
 import { generateCausalInsights } from "@/lib/causalDebrief";
@@ -64,8 +74,36 @@ type TeamResultRow = {
   detail: Record<string, unknown> | null;
 };
 
+type RoundPointsRow = {
+  team_id: string;
+  round_number: number;
+  points_earned: number | null;
+};
+
+type MetricKey = "spi" | "cpi" | "quality" | "safety" | "stakeholder";
+
+type MetricConfig = {
+  key: MetricKey;
+  label: string;
+  threshold: number;
+  precision: number;
+  kind: "index" | "score";
+};
+
+const METRIC_CONFIG: MetricConfig[] = [
+  { key: "spi", label: "SPI", threshold: 1.05, precision: 2, kind: "index" },
+  { key: "cpi", label: "CPI", threshold: 1.04, precision: 2, kind: "index" },
+  { key: "quality", label: "Quality", threshold: 85, precision: 0, kind: "score" },
+  { key: "safety", label: "Safety", threshold: 88, precision: 0, kind: "score" },
+  { key: "stakeholder", label: "Stakeholder", threshold: 84, precision: 0, kind: "score" },
+];
+
 function clampPercent(value: number) {
   return Math.max(0, Math.min(100, value));
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function formatCurrencyInr(value: number) {
@@ -78,20 +116,125 @@ function toNumber(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function metricBadgeTone(metric: string) {
-  if (metric === "SPI") return "border-cyan-400/20 bg-cyan-400/10 text-cyan-100";
-  if (metric === "CPI") return "border-amber-400/25 bg-amber-400/10 text-amber-100";
-  if (metric === "Safety") return "border-rose-400/25 bg-rose-400/10 text-rose-100";
-  if (metric === "Quality") return "border-violet-400/25 bg-violet-400/10 text-violet-100";
-  if (metric === "Stakeholder") return "border-emerald-400/25 bg-emerald-400/10 text-emerald-100";
-  if (metric === "KPI") return "border-fuchsia-400/25 bg-fuchsia-400/10 text-fuchsia-100";
-  return "border-white/10 bg-white/5 text-slate-200";
+function metricValueFromResult(result: TeamResultRow | null, key: MetricKey) {
+  if (!result) return 0;
+  if (key === "spi") return toNumber(result.schedule_index, 0);
+  if (key === "cpi") return toNumber(result.cost_index, 0);
+  if (key === "quality") return toNumber(result.quality_score, 0);
+  if (key === "safety") return toNumber(result.safety_score, 0);
+  return toNumber(result.stakeholder_score, 0);
+}
+
+function formatMetricValue(value: number, precision: number) {
+  return precision === 0 ? `${Math.round(value)}` : value.toFixed(precision);
+}
+
+function metricThresholdLabel(config: MetricConfig) {
+  return config.kind === "index"
+    ? `Target ${config.threshold.toFixed(2)}`
+    : `Target ${Math.round(config.threshold)}`;
+}
+
+function buildMetricTileModel(
+  config: MetricConfig,
+  currentResult: TeamResultRow | null,
+  previousResult: TeamResultRow | null
+): MetricTileModel {
+  const current = metricValueFromResult(currentResult, config.key);
+  const previous = previousResult ? metricValueFromResult(previousResult, config.key) : null;
+  const delta = previous === null ? null : current - previous;
+  const normalizedScaleValue =
+    config.kind === "index" ? clamp(current, 0, 1.2) : clamp((current / 100) * 1.2, 0, 1.2);
+
+  return {
+    key: config.key,
+    label: config.label,
+    current,
+    previous,
+    displayValue: formatMetricValue(current, config.precision),
+    deltaLabel:
+      delta === null
+        ? "Baseline"
+        : `${delta > 0 ? "+" : ""}${formatMetricValue(delta, config.precision)}`,
+    deltaArrow: delta === null ? "\u2192" : delta >= 0 ? "\u2191" : "\u2193",
+    barPercent: clampPercent((normalizedScaleValue / 1.2) * 100),
+    isHealthy: current >= config.threshold,
+    thresholdLabel: metricThresholdLabel(config),
+  };
+}
+
+function comparisonMetricRows(
+  currentResult: TeamResultRow | null,
+  previousResult: TeamResultRow | null
+): ComparisonMetric[] {
+  const currentSpi = metricValueFromResult(currentResult, "spi");
+  const currentCpi = metricValueFromResult(currentResult, "cpi");
+  const currentQuality = metricValueFromResult(currentResult, "quality");
+  const currentSafety = metricValueFromResult(currentResult, "safety");
+  const currentStakeholder = metricValueFromResult(currentResult, "stakeholder");
+  const previousSpi = previousResult ? metricValueFromResult(previousResult, "spi") : null;
+  const previousCpi = previousResult ? metricValueFromResult(previousResult, "cpi") : null;
+  const previousQuality = previousResult ? metricValueFromResult(previousResult, "quality") : null;
+  const previousSafety = previousResult ? metricValueFromResult(previousResult, "safety") : null;
+  const previousStakeholder = previousResult
+    ? metricValueFromResult(previousResult, "stakeholder")
+    : null;
+
+  return [
+    {
+      label: "Schedule",
+      current: currentSpi,
+      previous: previousSpi,
+      scaledCurrent: clampPercent((currentSpi / 1.2) * 100),
+      scaledPrevious: previousSpi === null ? null : clampPercent((previousSpi / 1.2) * 100),
+      format: "index",
+    },
+    {
+      label: "Cost",
+      current: currentCpi,
+      previous: previousCpi,
+      scaledCurrent: clampPercent((currentCpi / 1.2) * 100),
+      scaledPrevious: previousCpi === null ? null : clampPercent((previousCpi / 1.2) * 100),
+      format: "index",
+    },
+    {
+      label: "Quality",
+      current: currentQuality,
+      previous: previousQuality,
+      scaledCurrent: clampPercent(currentQuality),
+      scaledPrevious: previousQuality === null ? null : clampPercent(previousQuality),
+      format: "score",
+    },
+    {
+      label: "Safety",
+      current: currentSafety,
+      previous: previousSafety,
+      scaledCurrent: clampPercent(currentSafety),
+      scaledPrevious: previousSafety === null ? null : clampPercent(previousSafety),
+      format: "score",
+    },
+    {
+      label: "Stakeholder",
+      current: currentStakeholder,
+      previous: previousStakeholder,
+      scaledCurrent: clampPercent(currentStakeholder),
+      scaledPrevious:
+        previousStakeholder === null ? null : clampPercent(previousStakeholder),
+      format: "score",
+    },
+  ];
 }
 
 function impactBorderTone(impact: "positive" | "negative" | "neutral") {
-  if (impact === "positive") return "border-l-emerald-400";
+  if (impact === "positive") return "border-l-teal-400";
   if (impact === "negative") return "border-l-rose-400";
   return "border-l-slate-500";
+}
+
+function impactBadgeTone(impact: "positive" | "negative" | "neutral") {
+  if (impact === "positive") return "border-emerald-400/30 bg-emerald-500/15 text-emerald-100";
+  if (impact === "negative") return "border-rose-400/30 bg-rose-500/15 text-rose-100";
+  return "border-slate-500/30 bg-slate-500/10 text-slate-200";
 }
 
 function sortInsights<T extends { impact: "positive" | "negative" | "neutral" }>(insights: T[]) {
@@ -107,36 +250,33 @@ function sortInsights<T extends { impact: "positive" | "negative" | "neutral" }>
 function getRoundPerformance(points: number) {
   if (points < 300) {
     return {
-      label: "Below average - review your focus allocation",
-      tone: "text-rose-300",
-      badge: "border-rose-500/30 bg-rose-500/15 text-rose-200",
-      bar: "from-rose-500 to-orange-500",
+      benchmark: "Below benchmark",
+      summary: "Recovery needed",
+      tone: "text-rose-200",
+      badge: "border-rose-500/30 bg-rose-500/15 text-rose-100",
+      gaugeColor: "#ef4444",
+      gaugeGlow: "shadow-[0_0_30px_rgba(239,68,68,0.25)]",
     };
   }
 
   if (points <= 500) {
     return {
-      label: "Average performance",
-      tone: "text-amber-300",
+      benchmark: "On benchmark",
+      summary: "Stable round",
+      tone: "text-amber-100",
       badge: "border-amber-500/30 bg-amber-500/15 text-amber-100",
-      bar: "from-amber-400 to-yellow-400",
-    };
-  }
-
-  if (points <= 700) {
-    return {
-      label: "Strong round",
-      tone: "text-emerald-300",
-      badge: "border-emerald-500/30 bg-emerald-500/15 text-emerald-100",
-      bar: "from-emerald-400 to-teal-400",
+      gaugeColor: "#f59e0b",
+      gaugeGlow: "shadow-[0_0_30px_rgba(245,158,11,0.22)]",
     };
   }
 
   return {
-    label: "Exceptional - top quartile performance",
-    tone: "text-cyan-200",
-    badge: "border-cyan-400/30 bg-cyan-400/15 text-cyan-100",
-    bar: "from-cyan-400 to-sky-400",
+    benchmark: "Above benchmark",
+    summary: "High-performing round",
+    tone: "text-emerald-100",
+    badge: "border-emerald-500/30 bg-emerald-500/15 text-emerald-100",
+    gaugeColor: "#22c55e",
+    gaugeGlow: "shadow-[0_0_30px_rgba(34,197,94,0.22)]",
   };
 }
 
@@ -175,8 +315,8 @@ export default function RoundResultsPage() {
   const [session, setSession] = useState<SessionRow | null>(null);
   const [team, setTeam] = useState<TeamRow | null>(null);
   const [decision, setDecision] = useState<DecisionRow | null>(null);
-  const [result, setResult] = useState<TeamResultRow | null>(null);
-  const [previousResult, setPreviousResult] = useState<TeamResultRow | null>(null);
+  const [teamHistory, setTeamHistory] = useState<TeamResultRow[]>([]);
+  const [roundPoints, setRoundPoints] = useState<RoundPointsRow[]>([]);
   const [showAllInsights, setShowAllInsights] = useState(false);
 
   useEffect(() => {
@@ -255,14 +395,13 @@ export default function RoundResultsPage() {
       const teamResultSelect =
         "session_id,team_id,round_number,schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,detail";
 
-      const [resultResponse, decisionResponse, previousResultResponse] = await Promise.all([
+      const [historyResponse, decisionResponse, roundPointsResponse] = await Promise.all([
         supabase
           .from("team_results")
           .select(teamResultSelect)
           .eq("session_id", sessionId)
           .eq("team_id", myTeam.id)
-          .eq("round_number", roundNumber)
-          .maybeSingle(),
+          .order("round_number", { ascending: true }),
         supabase
           .from("decisions")
           .select(
@@ -272,20 +411,16 @@ export default function RoundResultsPage() {
           .eq("team_id", myTeam.id)
           .eq("round_number", roundNumber)
           .maybeSingle(),
-        roundNumber > 1
-          ? supabase
-              .from("team_results")
-              .select(teamResultSelect)
-              .eq("session_id", sessionId)
-              .eq("team_id", myTeam.id)
-              .eq("round_number", roundNumber - 1)
-              .maybeSingle()
-          : Promise.resolve({ data: null, error: null }),
+        supabase
+          .from("team_results")
+          .select("team_id,round_number,points_earned")
+          .eq("session_id", sessionId)
+          .eq("round_number", roundNumber),
       ]);
 
-      if (resultResponse.error) {
+      if (historyResponse.error) {
         if (!cancelled) {
-          setError(resultResponse.error.message);
+          setError(historyResponse.error.message);
           setLoading(false);
         }
         return;
@@ -299,9 +434,9 @@ export default function RoundResultsPage() {
         return;
       }
 
-      if (previousResultResponse.error) {
+      if (roundPointsResponse.error) {
         if (!cancelled) {
-          setError(previousResultResponse.error.message);
+          setError(roundPointsResponse.error.message);
           setLoading(false);
         }
         return;
@@ -311,8 +446,8 @@ export default function RoundResultsPage() {
         setSession((sessionResponse.data as SessionRow | null) ?? null);
         setTeam(myTeam);
         setDecision((decisionResponse.data as DecisionRow | null) ?? null);
-        setResult((resultResponse.data as TeamResultRow | null) ?? null);
-        setPreviousResult((previousResultResponse.data as TeamResultRow | null) ?? null);
+        setTeamHistory((historyResponse.data as TeamResultRow[] | null) ?? []);
+        setRoundPoints((roundPointsResponse.data as RoundPointsRow[] | null) ?? []);
         setLoading(false);
       }
     };
@@ -324,18 +459,39 @@ export default function RoundResultsPage() {
     };
   }, [roundNumber, sessionId, supabase]);
 
+  const result = useMemo(
+    () => teamHistory.find((row) => row.round_number === roundNumber) ?? null,
+    [roundNumber, teamHistory]
+  );
+
+  const previousResult = useMemo(
+    () => teamHistory.find((row) => row.round_number === roundNumber - 1) ?? null,
+    [roundNumber, teamHistory]
+  );
+
   useEffect(() => {
     setShowAllInsights(false);
   }, [roundNumber, result?.team_id]);
 
   const pointsThisRound = Math.max(0, Math.round(result?.points_earned ?? 0));
   const pointsPerformance = getRoundPerformance(pointsThisRound);
-  const roundPerformancePct = clampPercent((pointsThisRound / 800) * 100);
   const cashClosing = result?.cash_closing ?? 0;
   const cashState = getCashClosingState(cashClosing);
   const resultDetail = (result?.detail ?? null) as Record<string, any> | null;
   const latePenalty = toNumber(resultDetail?.kpi?.late_points_penalty, 0);
   const basePoints = Math.round(toNumber(resultDetail?.kpi?.base_points, pointsThisRound));
+  const claimEntitlement = Math.round(toNumber(result?.claim_entitlement_score, 0));
+  const totalTeamPoints = Math.round(team?.total_points ?? pointsThisRound);
+
+  const roundRank = useMemo(() => {
+    if (!team) return null;
+    const ranking = [...roundPoints].sort(
+      (left, right) => toNumber(right.points_earned, 0) - toNumber(left.points_earned, 0)
+    );
+    const index = ranking.findIndex((row) => row.team_id === team.id);
+    return index < 0 ? null : { rank: index + 1, total: ranking.length };
+  }, [roundPoints, team]);
+
   const normalizedResult: RoundResult | null = result
     ? {
         schedule_index: toNumber(result.schedule_index, 0),
@@ -417,6 +573,32 @@ export default function RoundResultsPage() {
     return buildDeterministicRoundDebrief(normalizedResult, decisionDraft);
   }, [decisionDraft, normalizedResult]);
 
+  const metricTiles = useMemo(
+    () => METRIC_CONFIG.map((config) => buildMetricTileModel(config, result, previousResult)),
+    [previousResult, result]
+  );
+
+  const comparisonMetrics = useMemo(
+    () => comparisonMetricRows(result, previousResult),
+    [previousResult, result]
+  );
+
+  const historyRows = useMemo<HistoryMetricRow[]>(
+    () =>
+      [...teamHistory]
+        .sort((left, right) => left.round_number - right.round_number)
+        .map((row) => ({
+          roundLabel: `Round ${row.round_number}`,
+          spi: clamp(toNumber(row.schedule_index, 0), 0, 1.2),
+          cpi: clamp(toNumber(row.cost_index, 0), 0, 1.2),
+          quality: clamp(toNumber(row.quality_score, 0), 0, 100),
+          safety: clamp(toNumber(row.safety_score, 0), 0, 100),
+          stakeholder: clamp(toNumber(row.stakeholder_score, 0), 0, 100),
+          pointsScaled: clamp(toNumber(row.points_earned, 0) / 100, 0, 100),
+        })),
+    [teamHistory]
+  );
+
   return (
     <RequireAuth>
       <main className="min-h-[100dvh] bg-[#020617] px-4 py-8 text-slate-200 md:px-6">
@@ -476,184 +658,111 @@ export default function RoundResultsPage() {
             <>
               <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
                 <Card className="border-white/10 bg-slate-900/70">
-                  <CardHeader
-                    title="Round performance"
-                    subtitle="Scoring benchmark against the round maximum"
-                  />
+                  <CardHeader title="Score Hero" subtitle="Visual round benchmark for your latest locked result" />
                   <CardBody className="space-y-5">
-                    <div className="flex flex-wrap items-start justify-between gap-4">
-                      <div>
-                        <div className="text-xs font-bold uppercase tracking-[0.22em] text-slate-500">
-                          Points earned
-                        </div>
-                        <div className="mt-2 text-4xl font-black tracking-tight text-white">
-                          {pointsThisRound} pts this round
-                        </div>
-                      </div>
-                      <div className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${pointsPerformance.badge}`}>
-                        {pointsPerformance.label}
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="mb-2 flex items-center justify-between text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-                        <span>Round performance</span>
-                        <span className={pointsPerformance.tone}>{Math.round(roundPerformancePct)}% of 800</span>
-                      </div>
-                      <div className="h-3 rounded-full bg-slate-800">
-                        <div
-                          className={`h-3 rounded-full bg-gradient-to-r ${pointsPerformance.bar}`}
-                          style={{ width: `${roundPerformancePct}%` }}
+                    <div className="grid gap-6 xl:grid-cols-[280px_1fr]">
+                      <div className={`rounded-[28px] border border-white/10 bg-slate-950/80 px-4 py-5 ${pointsPerformance.gaugeGlow}`}>
+                        <ScoreGauge
+                          points={pointsThisRound}
+                          roundNumber={roundNumber}
+                          benchmarkLabel={pointsPerformance.benchmark}
+                          color={pointsPerformance.gaugeColor}
+                          rankLabel={roundRank ? `Rank #${roundRank.rank} / ${roundRank.total}` : "Rank pending"}
                         />
                       </div>
-                    </div>
+                      <div className="space-y-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3 rounded-[28px] border border-white/10 bg-slate-950/70 px-5 py-5">
+                          <div>
+                            <div className="text-xs font-bold uppercase tracking-[0.22em] text-slate-500">Benchmark read</div>
+                            <div className={`mt-2 text-2xl font-black tracking-tight ${pointsPerformance.tone}`}>{pointsPerformance.summary}</div>
+                            <div className="mt-2 text-sm text-slate-400">Gauge reflects this round&apos;s points earned against the 800-point ceiling.</div>
+                          </div>
+                          <div className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${pointsPerformance.badge}`}>{pointsPerformance.benchmark}</div>
+                        </div>
 
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
-                          Base points
+                        <div className="grid gap-4 sm:grid-cols-3">
+                          <StatTile label="Base points" value={basePoints} color="#0D6E6E" />
+                          <StatTile label="Penalties" value={Math.round(result.penalties ?? 0)} color="#EF4444" />
+                          <StatTile label="Late penalty" value={latePenalty} color="#F59E0B" />
                         </div>
-                        <div className="mt-2 text-2xl font-black text-white">{basePoints}</div>
-                      </div>
-                      <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
-                          Penalties
+
+                        <div className="rounded-[26px] border border-cyan-400/15 bg-cyan-400/8 px-4 py-4 text-sm text-cyan-50">
+                          {roundNumber === 1
+                            ? "This is your opening benchmark round, so deltas and previous-round comparisons begin from the next result."
+                            : "Current gauges, deltas, and radar comparison all benchmark against your last completed round."}
                         </div>
-                        <div className="mt-2 text-2xl font-black text-white">{Math.round(result.penalties ?? 0)}</div>
-                      </div>
-                      <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
-                          Late penalty
-                        </div>
-                        <div className="mt-2 text-2xl font-black text-white">{latePenalty}</div>
                       </div>
                     </div>
                   </CardBody>
                 </Card>
 
                 <Card className="border-white/10 bg-slate-900/70">
-                  <CardHeader
-                    title="Cash closing"
-                    subtitle="Round-end cash signal"
-                    right={
-                      <Tooltip
-                        title="Cash closing"
-                        lines={[
-                          "Cash closing = revenue received minus all project costs this round.",
-                          "Persistent negative cash increases CPI pressure in future rounds.",
-                        ]}
-                      />
-                    }
-                  />
+                  <CardHeader title="Cash closing" subtitle="Round-end liquidity and commercial resilience" right={<Tooltip title="Cash closing" lines={["Cash closing = revenue received minus all project costs this round.", "Persistent negative cash increases CPI pressure in future rounds."]} />} />
                   <CardBody className="space-y-5">
-                    <div className={`text-4xl font-black tracking-tight ${cashState.amountTone}`}>
-                      Rs {formatCurrencyInr(cashClosing)}
-                    </div>
+                    <div className={`text-4xl font-black tracking-tight ${cashState.amountTone}`}>Rs {formatCurrencyInr(cashClosing)}</div>
                     <div className={`rounded-2xl border px-4 py-4 text-sm font-semibold ${cashState.badge}`}>
                       {cashState.label}
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2">
-                      <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
-                          CPI
-                        </div>
-                        <div className="mt-2 text-2xl font-black text-white">
-                          {toNumber(result.cost_index, 0).toFixed(2)}
-                        </div>
-                      </div>
-                      <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
-                          Total team points
-                        </div>
-                        <div className="mt-2 text-2xl font-black text-white">
-                          {Math.round(team?.total_points ?? pointsThisRound)}
-                        </div>
-                      </div>
+                      <StatTile label="Claim entitlement" value={claimEntitlement} color="#0D6E6E" />
+                      <StatTile label="Total team points" value={totalTeamPoints} color="#0D6E6E" />
                     </div>
+                    {kpiTarget && kpiEvaluation ? (
+                      <div className={`rounded-[22px] border px-4 py-3 text-sm font-semibold ${kpiEvaluation.achieved ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100" : "border-amber-500/30 bg-amber-500/10 text-amber-100"}`}>
+                        KPI {kpiEvaluation.achieved ? "hit" : "miss"} - {kpiEvaluation.thresholdLabel}
+                      </div>
+                    ) : null}
                   </CardBody>
                 </Card>
               </div>
 
               <Card className="border-white/10 bg-slate-900/70">
-                <CardHeader
-                  title="Round scorecard"
-                  subtitle="Execution, quality, and stakeholder outcomes from this locked round"
-                />
-                <CardBody>
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                    <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">SPI</div>
-                      <div className="mt-2 text-3xl font-black text-white">
-                        {toNumber(result.schedule_index, 0).toFixed(2)}
-                      </div>
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Quality</div>
-                      <div className="mt-2 text-3xl font-black text-white">
-                        {Math.round(result.quality_score ?? 0)}
-                      </div>
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Safety</div>
-                      <div className="mt-2 text-3xl font-black text-white">
-                        {Math.round(result.safety_score ?? 0)}
-                      </div>
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
-                        Stakeholder
-                      </div>
-                      <div className="mt-2 text-3xl font-black text-white">
-                        {Math.round(result.stakeholder_score ?? 0)}
-                      </div>
-                    </div>
+                <CardHeader title="Metrics Row" subtitle="Round health across schedule, cost, quality, safety, and stakeholder outcomes" />
+                <CardBody className="space-y-4">
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+                    {metricTiles.map((tile) => (
+                      <ResultsMetricTile key={tile.key} tile={tile} />
+                    ))}
                   </div>
-
-                  <div className="mt-4 flex flex-wrap gap-3 text-xs font-semibold uppercase tracking-[0.16em]">
-                    {kpiTarget && kpiEvaluation ? (
-                      <div
-                        className={`rounded-full border px-3 py-1.5 ${
-                          kpiEvaluation.achieved
-                            ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-100"
-                            : "border-amber-500/30 bg-amber-500/15 text-amber-100"
-                        }`}
-                      >
-                        KPI {kpiEvaluation.achieved ? "hit" : "miss"} - {kpiEvaluation.thresholdLabel}
-                      </div>
-                    ) : null}
-                    <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-slate-300">
-                      Claim entitlement {Math.round(result.claim_entitlement_score ?? 0)}
-                    </div>
+                  <div className="flex flex-wrap gap-3 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">Claim entitlement {claimEntitlement}</div>
+                    <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">Base points {basePoints}</div>
+                    <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">Late penalty {latePenalty}</div>
                   </div>
                 </CardBody>
               </Card>
 
               <Card className="border-white/10 bg-slate-900/70">
-                <CardHeader
-                  title="What Happened This Round"
-                  subtitle="Cause-and-effect signals from your decisions, score shifts, and round shocks"
-                />
+                <CardHeader title="This Round vs Last Round" subtitle="Radar comparison across the five scoring axes" />
+                <CardBody className="space-y-4">
+                  <RadarComparisonChart metrics={comparisonMetrics} />
+                  {roundNumber === 1 ? (
+                    <div className="rounded-[22px] border border-white/10 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
+                      Previous-round overlay is hidden for Round 1 because no earlier result exists yet.
+                    </div>
+                  ) : null}
+                </CardBody>
+              </Card>
+
+              <Card className="border-white/10 bg-slate-900/70">
+                <CardHeader title={"\u{1F50D} What Drove Your Score"} subtitle="Cause-and-effect signals from your decisions, score shifts, and round shocks" />
                 <CardBody className="space-y-4">
                   {visibleCausalInsights.length > 0 ? (
-                    <div className="space-y-3">
+                    <div className="space-y-4">
                       {visibleCausalInsights.map((insight, index) => (
                         <div
                           key={`${insight.metric}-${index}-${insight.decision}`}
-                          className={`flex items-start justify-between gap-4 rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4 border-l-4 ${impactBorderTone(insight.impact)}`}
+                          className={`rounded-[26px] border border-white/10 bg-slate-950/75 px-5 py-5 border-l-4 ${impactBorderTone(insight.impact)}`}
                         >
-                          <div className="min-w-0 space-y-2">
-                            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                              {insight.decision}
+                          <div className="flex flex-wrap items-start justify-between gap-4">
+                            <div className="min-w-0 flex-1 space-y-3">
+                              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">{insight.decision}</div>
+                              <div className="text-base font-bold leading-6 text-white">{insight.outcome}</div>
+                              <div className="text-sm italic text-teal-300">{"\u2192"} {insight.advice}</div>
                             </div>
-                            <div className="text-base font-bold leading-6 text-white">{insight.outcome}</div>
-                            <div className="text-sm italic text-teal-300">
-                              Next round: {insight.advice}
+                            <div className={`shrink-0 rounded-full border px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.18em] ${impactBadgeTone(insight.impact)}`}>
+                              {insight.metric}
                             </div>
-                          </div>
-                          <div
-                            className={`shrink-0 rounded-full border px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.18em] ${metricBadgeTone(insight.metric)}`}
-                          >
-                            {insight.metric}
                           </div>
                         </div>
                       ))}
@@ -679,77 +788,95 @@ export default function RoundResultsPage() {
               {aiDebrief ? (
                 <Card className="border-white/10 bg-slate-900/70">
                   <CardHeader
-                    title="AI Debrief"
+                    title="AI Analysis"
                     subtitle="Deterministic coaching based on your round outcome and weakest execution concepts"
                   />
                   <CardBody className="space-y-5">
-                    <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-4 text-sm text-cyan-50">
+                    <div className="rounded-[24px] border border-cyan-400/20 bg-cyan-400/10 px-4 py-4 text-sm text-cyan-50">
                       {aiDebrief.summary}
                     </div>
 
-                    <div className="grid gap-4 lg:grid-cols-2">
-                      <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
+                    <div className="grid gap-4 xl:grid-cols-3">
+                      <div className="rounded-[26px] border border-emerald-500/20 bg-slate-950/75 px-5 py-5">
+                        <div className="text-sm font-black uppercase tracking-[0.18em] text-emerald-200">
                           Strengths
                         </div>
-                        <div className="mt-3 space-y-2 text-sm text-slate-200">
+                        <div className="mt-1 text-xs text-slate-400">What held up well this round</div>
+                        <div className="mt-4 flex flex-wrap gap-3">
                           {aiDebrief.strengths.map((item) => (
-                            <div key={item} className="rounded-xl border border-emerald-500/15 bg-emerald-500/5 px-3 py-3">
+                            <div
+                              key={item}
+                              className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-50"
+                            >
                               {item}
                             </div>
                           ))}
                         </div>
                       </div>
 
-                      <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
-                          Risks To Watch
+                      <div className="rounded-[26px] border border-amber-500/20 bg-slate-950/75 px-5 py-5">
+                        <div className="text-sm font-black uppercase tracking-[0.18em] text-amber-200">
+                          Risks
                         </div>
-                        <div className="mt-3 space-y-2 text-sm text-slate-200">
+                        <div className="mt-1 text-xs text-slate-400">Pressure points to watch next</div>
+                        <div className="mt-4 flex flex-wrap gap-3">
                           {aiDebrief.risks.map((item) => (
-                            <div key={item} className="rounded-xl border border-amber-500/15 bg-amber-500/5 px-3 py-3">
+                            <div
+                              key={item}
+                              className="rounded-full border border-amber-500/20 bg-amber-500/10 px-4 py-2 text-sm text-amber-50"
+                            >
                               {item}
                             </div>
                           ))}
                         </div>
                       </div>
-                    </div>
 
-                    <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
-                          Practice Actions
-                        </div>
-                        <Link
-                          href={`/sessions/${sessionId}/round/${roundNumber}/practice`}
-                          className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200 transition hover:text-cyan-100"
-                        >
-                          Open practice
-                        </Link>
-                      </div>
-                      <div className="mt-3 grid gap-3 md:grid-cols-3">
-                        {aiDebrief.actions.map((action) => (
-                          <div
-                            key={`${action.concept_code}-${action.title}`}
-                            className="rounded-2xl border border-white/10 bg-slate-900/70 px-4 py-4"
-                          >
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="text-sm font-bold text-white">{action.title}</div>
-                              <div className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-300">
-                                {action.concept_code}
-                              </div>
+                      <div className="rounded-[26px] border border-teal-500/20 bg-slate-950/75 px-5 py-5">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-black uppercase tracking-[0.18em] text-teal-200">
+                              Recommended Actions
                             </div>
-                            <div className="mt-2 text-sm text-slate-300">{action.why}</div>
-                            <div className="mt-3 text-xs font-semibold uppercase tracking-[0.18em] text-teal-300">
-                              {action.practice_minutes} min drill
-                            </div>
+                            <div className="mt-1 text-xs text-slate-400">Practice next before the next lock</div>
                           </div>
-                        ))}
+                          <Link
+                            href={`/sessions/${sessionId}/round/${roundNumber}/practice`}
+                            className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200 transition hover:text-cyan-100"
+                          >
+                            Open practice
+                          </Link>
+                        </div>
+                        <div className="mt-4 flex flex-col gap-3">
+                          {aiDebrief.actions.map((action) => (
+                            <div
+                              key={`${action.concept_code}-${action.title}`}
+                              className="rounded-[22px] border border-teal-500/20 bg-teal-500/10 px-4 py-3 text-sm text-teal-50"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-3">
+                                <div className="text-sm font-bold text-white">{action.title}</div>
+                                <div className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-200">
+                                  {action.concept_code} | {action.practice_minutes} min
+                                </div>
+                              </div>
+                              <div className="mt-2 text-teal-50/90">{action.why}</div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     </div>
                   </CardBody>
                 </Card>
               ) : null}
+
+              <Card className="border-white/10 bg-slate-900/70">
+                <CardHeader title="Performance Across All Rounds" subtitle="Smooth trend view for schedule, cost, quality, safety, and scaled points" />
+                <CardBody className="space-y-4">
+                  <PerformanceHistoryChart rows={historyRows} />
+                  <div className="rounded-[22px] border border-white/10 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
+                    Left axis shows SPI/CPI on a 0-1.2 range. Right axis shows Quality, Safety, and Points/100 on a 0-100 range.
+                  </div>
+                </CardBody>
+              </Card>
             </>
           )}
         </div>

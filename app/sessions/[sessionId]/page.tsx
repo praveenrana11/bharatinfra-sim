@@ -5,10 +5,12 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
 import { getSupabaseClient } from "@/lib/supabaseClient";
-import { Card, CardBody, CardHeader } from "@/components/ui/Card";
+import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { Badge } from "@/components/ui/Badge";
+import { MetricTile } from "@/components/ui/MetricTile";
+import { Page } from "@/components/ui/Page";
 import { ConstructionEvent, getRoundConstructionEvents } from "@/lib/constructionNews";
-import RoundStepper, { RoundNode, RoundState } from "@/components/RoundStepper";
 import { computeRoundResultV2, DecisionDraft, RoundResult } from "@/lib/simEngine";
 import { parseDecisionProfile, DEFAULT_DECISION_PROFILE, DecisionProfile } from "@/lib/decisionProfile";
 import { parseKpiTarget, evaluateKpiAchievement, applyKpiMultiplier } from "@/lib/kpi";
@@ -27,14 +29,11 @@ type TeamRow = {
   total_points: number | null;
   kpi_target: string | null;
   identity_completed: boolean;
+  scenario_id: string | null;
 };
 type SessionTeamRow = { id: string; kpi_target: string | null };
-
-type DecisionRow = DecisionDraft & {
-  locked: boolean;
-  raw: Record<string, unknown> | null;
-};
-
+type ScenarioRow = { name: string | null; client: string | null; duration_rounds: number | null };
+type DecisionRow = DecisionDraft & { locked: boolean; raw: Record<string, unknown> | null };
 type TeamResultFullRow = {
   schedule_index: number;
   cost_index: number;
@@ -47,40 +46,17 @@ type TeamResultFullRow = {
   penalties: number;
   detail: Record<string, unknown> | null;
 };
-
-type TeamScoreRow = {
-  team_id: string;
-  points_earned: number | null;
-};
-
-type AutoCloseSummary = {
-  autoLockedTeams: number;
-  generatedResults: number;
-  preservedLockedTeams: number;
-  totalLatePenalty: number;
-};
-
-type SessionRow = {
-  name: string | null;
-  code: string;
-  status: string;
-  round_count: number;
-  current_round: number;
-  created_by: string;
-};
-
+type TeamScoreRow = { team_id: string; points_earned: number | null };
+type AutoCloseSummary = { autoLockedTeams: number; generatedResults: number; preservedLockedTeams: number; totalLatePenalty: number };
+type SessionRow = { name: string | null; code: string; status: string; round_count: number; current_round: number; created_by: string };
 type TeamResultRow = { round_number: number };
-
-type SessionRoundRow = {
-  deadline_at: string;
-  status: string | null;
-  news_payload: unknown;
-};
+type SessionRoundRow = { deadline_at: string; status: string | null; news_payload: unknown };
+type LeaderboardEntry = { id: string; teamName: string; totalPoints: number; currentRank: number; previousRank: number };
+type PreviousMetrics = { spi: number | null; cpi: number | null; safety: number | null; points: number | null };
 
 const DEFAULT_ROUND_WINDOW_MINUTES = 35;
 const LATE_PENALTY_PER_MINUTE = 2;
 const LATE_PENALTY_CAP = 80;
-
 const DEFAULT_DECISION_DRAFT: DecisionDraft = {
   focus_cost: 25,
   focus_quality: 25,
@@ -92,119 +68,80 @@ const DEFAULT_DECISION_DRAFT: DecisionDraft = {
   vendor_strategy: "Balanced",
 };
 
-function isMissingTableError(message: string) {
+const isMissingTableError = (message: string) => {
   const lower = message.toLowerCase();
-  return (
-    lower.includes("does not exist") ||
-    lower.includes("relation") ||
-    lower.includes("42p01") ||
-    lower.includes("schema cache") ||
-    lower.includes("could not find the table")
-  );
-}
-
-function formatClock(ms: number) {
-  const clamped = Math.max(0, ms);
-  const minutes = Math.floor(clamped / 60000);
-  const seconds = Math.floor((clamped % 60000) / 1000);
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
+  return lower.includes("does not exist") || lower.includes("relation") || lower.includes("42p01") || lower.includes("schema cache") || lower.includes("could not find the table");
+};
+const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+const isSessionCompleted = (status: string | null | undefined) => ["complete", "completed"].includes(status?.toLowerCase() ?? "");
+const formatClock = (ms: number) => `${String(Math.floor(Math.max(0, ms) / 60000)).padStart(2, "0")}:${String(Math.floor((Math.max(0, ms) % 60000) / 1000)).padStart(2, "0")}`;
+const buildDecisionFromRow = (row: DecisionRow): DecisionDraft => ({
+  focus_cost: row.focus_cost,
+  focus_quality: row.focus_quality,
+  focus_stakeholder: row.focus_stakeholder,
+  focus_speed: row.focus_speed,
+  risk_appetite: row.risk_appetite,
+  governance_intensity: row.governance_intensity,
+  buffer_percent: row.buffer_percent,
+  vendor_strategy: row.vendor_strategy,
+});
 
 function parseRoundEvents(payload: unknown): ConstructionEvent[] | null {
   if (!Array.isArray(payload)) return null;
-
   const parsed = payload.filter((item) => {
     if (!item || typeof item !== "object") return false;
     const event = item as Record<string, unknown>;
-    return (
-      typeof event.id === "string" &&
-      typeof event.title === "string" &&
-      typeof event.description === "string" &&
-      typeof event.severity === "number" &&
-      Array.isArray(event.tags)
-    );
+    return typeof event.id === "string" && typeof event.title === "string" && typeof event.description === "string" && typeof event.severity === "number" && Array.isArray(event.tags);
   }) as ConstructionEvent[];
-
   return parsed.length > 0 ? parsed : null;
 }
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function isSessionCompleted(status: string | null | undefined) {
-  const normalized = status?.toLowerCase();
-  return normalized === "complete" || normalized === "completed";
-}
-
 function computeLatePenalty(deadlineIso: string | null, submittedIso: string) {
-  if (!deadlineIso) {
-    return {
-      minutesLate: 0,
-      pointsPenalty: 0,
-      stakeholderPenalty: 0,
-      extensionMode: false,
-    };
-  }
-
+  if (!deadlineIso) return { minutesLate: 0, pointsPenalty: 0, stakeholderPenalty: 0, extensionMode: false };
   const deadlineMs = Date.parse(deadlineIso);
   const submittedMs = Date.parse(submittedIso);
   const deltaMs = submittedMs - deadlineMs;
-
-  if (!Number.isFinite(deadlineMs) || !Number.isFinite(submittedMs) || deltaMs <= 0) {
-    return {
-      minutesLate: 0,
-      pointsPenalty: 0,
-      stakeholderPenalty: 0,
-      extensionMode: false,
-    };
-  }
-
+  if (!Number.isFinite(deadlineMs) || !Number.isFinite(submittedMs) || deltaMs <= 0) return { minutesLate: 0, pointsPenalty: 0, stakeholderPenalty: 0, extensionMode: false };
   const minutesLate = Math.max(1, Math.ceil(deltaMs / 60000));
-  const pointsPenalty = Math.min(LATE_PENALTY_CAP, minutesLate * LATE_PENALTY_PER_MINUTE);
-  const stakeholderPenalty = Math.min(12, Math.ceil(minutesLate / 4));
-
   return {
     minutesLate,
-    pointsPenalty,
-    stakeholderPenalty,
+    pointsPenalty: Math.min(LATE_PENALTY_CAP, minutesLate * LATE_PENALTY_PER_MINUTE),
+    stakeholderPenalty: Math.min(12, Math.ceil(minutesLate / 4)),
     extensionMode: true,
   };
 }
 
-function buildDecisionFromRow(row: DecisionRow): DecisionDraft {
-  return {
-    focus_cost: row.focus_cost,
-    focus_quality: row.focus_quality,
-    focus_stakeholder: row.focus_stakeholder,
-    focus_speed: row.focus_speed,
-    risk_appetite: row.risk_appetite,
-    governance_intensity: row.governance_intensity,
-    buffer_percent: row.buffer_percent,
-    vendor_strategy: row.vendor_strategy,
-  };
+function DeltaArrow({ direction }: { direction: "up" | "down" | "flat" }) {
+  if (direction === "flat") return <span className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">No change</span>;
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-bold uppercase tracking-[0.18em] ${direction === "up" ? "border-emerald-400/20 bg-emerald-500/10 text-emerald-100" : "border-rose-400/20 bg-rose-500/10 text-rose-100"}`}>
+      <svg viewBox="0 0 16 16" className={`h-3 w-3 ${direction === "down" ? "rotate-180" : ""}`} fill="none" stroke="currentColor">
+        <path d="M8 12V4M8 4 4.5 7.5M8 4l3.5 3.5" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
+      </svg>
+      {direction === "up" ? "Up" : "Down"}
+    </span>
+  );
 }
 
 export default function SessionPage() {
   const params = useParams();
   const router = useRouter();
   const supabase = useMemo(() => getSupabaseClient(), []);
-
-  const routeParams = params as RouteParams;
-  const sessionId = routeParams.sessionId ?? "";
+  const sessionId = (params as RouteParams).sessionId ?? "";
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
   const [sessionName, setSessionName] = useState("");
+  const [scenarioName, setScenarioName] = useState("Project Scenario");
+  const [scenarioClient, setScenarioClient] = useState("Client");
   const [code, setCode] = useState("");
   const [status, setStatus] = useState("");
   const [roundCount, setRoundCount] = useState(0);
   const [sessionCurrentRound, setSessionCurrentRound] = useState(0);
-
+  const [teamId, setTeamId] = useState("");
   const [teamName, setTeamName] = useState("");
   const [points, setPoints] = useState(0);
-  const [teamKpi, setTeamKpi] = useState<string>("Not selected");
+  const [teamKpi, setTeamKpi] = useState("Not selected");
   const [completedRound, setCompletedRound] = useState(0);
   const [viewerUserId, setViewerUserId] = useState("");
   const [isHost, setIsHost] = useState(false);
@@ -212,18 +149,17 @@ export default function SessionPage() {
   const [adminMessage, setAdminMessage] = useState("");
   const [lastAutoCloseSummary, setLastAutoCloseSummary] = useState<AutoCloseSummary | null>(null);
   const [autoCloseAttemptKey, setAutoCloseAttemptKey] = useState("");
-
   const [nextRound, setNextRound] = useState(1);
   const [roundDeadlineIso, setRoundDeadlineIso] = useState<string | null>(null);
-  const [roundStatus, setRoundStatus] = useState("open");
+  const [roundStatus, setRoundStatus] = useState("pending");
   const [orchestrationSource, setOrchestrationSource] = useState<"shared" | "fallback">("fallback");
   const [roundShocks, setRoundShocks] = useState<ConstructionEvent[]>([]);
-
   const [lockedTeams, setLockedTeams] = useState(0);
   const [teamCount, setTeamCount] = useState(0);
   const [showHowToPlayButton, setShowHowToPlayButton] = useState(false);
-
   const [clockNow, setClockNow] = useState(0);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [previousMetrics, setPreviousMetrics] = useState<PreviousMetrics>({ spi: null, cpi: null, safety: null, points: null });
   const onboardingCheckRef = useRef(false);
 
   useEffect(() => {
@@ -231,32 +167,59 @@ export default function SessionPage() {
     return () => window.clearInterval(id);
   }, []);
 
+  async function refreshSessionAnalytics(activeTeamId: string, latestCompletedRound: number) {
+    const { data: teamsData, error: teamsErr } = await supabase.from("teams").select("id,team_name,total_points").eq("session_id", sessionId);
+    if (teamsErr) throw teamsErr;
+    const teams = (teamsData ?? []) as Array<{ id: string; team_name: string; total_points: number | null }>;
+    const totals = new Map(teams.map((row) => [row.id, row.total_points ?? 0]));
+    setTeamCount(teams.length);
+    setPoints(totals.get(activeTeamId) ?? 0);
+
+    let roundRows: Array<{ team_id: string; points_earned: number | null; schedule_index: number | null; cost_index: number | null; safety_score: number | null }> = [];
+    if (latestCompletedRound > 0) {
+      const { data, error: roundErr } = await supabase.from("team_results").select("team_id,points_earned,schedule_index,cost_index,safety_score").eq("session_id", sessionId).eq("round_number", latestCompletedRound);
+      if (roundErr) throw roundErr;
+      roundRows = data ?? [];
+    }
+
+    const roundPoints = new Map<string, number>();
+    let metrics: PreviousMetrics = { spi: null, cpi: null, safety: null, points: null };
+    for (const row of roundRows) {
+      roundPoints.set(row.team_id, row.points_earned ?? 0);
+      if (row.team_id === activeTeamId) metrics = { spi: row.schedule_index ?? null, cpi: row.cost_index ?? null, safety: row.safety_score ?? null, points: row.points_earned ?? null };
+    }
+
+    const currentRanked = [...teams].sort((a, b) => (b.total_points ?? 0) - (a.total_points ?? 0));
+    const currentRankMap = new Map(currentRanked.map((row, index) => [row.id, index + 1]));
+    const previousRankMap = new Map(
+      [...teams]
+        .map((row) => ({ ...row, previousPoints: (row.total_points ?? 0) - (roundPoints.get(row.id) ?? 0) }))
+        .sort((a, b) => b.previousPoints - a.previousPoints)
+        .map((row, index) => [row.id, index + 1])
+    );
+
+    setLeaderboard(currentRanked.map((row) => ({
+      id: row.id,
+      teamName: row.team_name,
+      totalPoints: row.total_points ?? 0,
+      currentRank: currentRankMap.get(row.id) ?? 1,
+      previousRank: previousRankMap.get(row.id) ?? currentRankMap.get(row.id) ?? 1,
+    })));
+    setPreviousMetrics(metrics);
+  }
+
   useEffect(() => {
     (async () => {
       setError("");
       setLoading(true);
-
       const { data: userData } = await supabase.auth.getUser();
       const user = userData.user;
-      if (!user) {
-        router.replace("/login");
-        return;
-      }
+      if (!user) return void router.replace("/login");
 
-      const { data: sessionData, error: sessionErr } = await supabase
-        .from("sessions")
-        .select("name, code, status, round_count, current_round, created_by")
-        .eq("id", sessionId)
-        .single();
-
-      if (sessionErr) {
-        setError(sessionErr.message);
-        setLoading(false);
-        return;
-      }
+      const { data: sessionData, error: sessionErr } = await supabase.from("sessions").select("name, code, status, round_count, current_round, created_by").eq("id", sessionId).single();
+      if (sessionErr) return void (setError(sessionErr.message), setLoading(false));
 
       setViewerUserId(user.id);
-
       const session = sessionData as SessionRow;
       setSessionName(session.name ?? "");
       setCode(session.code ?? "");
@@ -265,117 +228,61 @@ export default function SessionPage() {
       setSessionCurrentRound(session.current_round ?? 0);
       setIsHost(session.created_by === user.id);
 
-      const { data: membershipsData, error: mErr } = await supabase
-        .from("team_memberships")
-        .select("team_id")
-        .eq("user_id", user.id);
+      const { data: membershipsData, error: membershipErr } = await supabase.from("team_memberships").select("team_id").eq("user_id", user.id);
+      if (membershipErr) return void (setError(membershipErr.message), setLoading(false));
 
-      if (mErr) {
-        setError(mErr.message);
-        setLoading(false);
-        return;
-      }
+      const teamIds = ((membershipsData ?? []) as MembershipRow[]).map((row) => row.team_id);
+      const { data: teamsData, error: teamsErr } = await supabase.from("teams").select("id, team_name, session_id, total_points, kpi_target, identity_completed, scenario_id").in("id", teamIds).eq("session_id", sessionId);
+      if (teamsErr) return void (setError(teamsErr.message), setLoading(false));
 
-      const memberships = (membershipsData ?? []) as MembershipRow[];
-      const teamIds = memberships.map((m) => m.team_id);
+      const myTeam = ((teamsData ?? []) as TeamRow[])[0];
+      if (!myTeam) return void (setError("You are not a member of this session."), setLoading(false));
 
-      const { data: teamsData, error: tErr } = await supabase
-        .from("teams")
-        .select("id, team_name, session_id, total_points, kpi_target, identity_completed")
-        .in("id", teamIds)
-        .eq("session_id", sessionId);
-
-      if (tErr) {
-        setError(tErr.message);
-        setLoading(false);
-        return;
-      }
-
-      const teams = (teamsData ?? []) as TeamRow[];
-      if (teams.length === 0) {
-        setError("You are not a member of this session.");
-        setLoading(false);
-        return;
-      }
-
-      const myTeam = teams[0];
+      setTeamId(myTeam.id);
       setTeamName(myTeam.team_name ?? "");
       setPoints(myTeam.total_points ?? 0);
       setTeamKpi(myTeam.kpi_target ?? "Not selected");
+      if (!myTeam.identity_completed && !isSessionCompleted(session.status)) return void router.replace(`/sessions/${sessionId}/identity`);
 
-      if (!myTeam.identity_completed && !isSessionCompleted(session.status)) {
-        router.replace(`/sessions/${sessionId}/identity`);
-        return;
-      }
+      const { data: lastResultData, error: resultErr } = await supabase.from("team_results").select("round_number").eq("session_id", sessionId).eq("team_id", myTeam.id).order("round_number", { ascending: false }).limit(1).maybeSingle();
+      if (resultErr) return void (setError(resultErr.message), setLoading(false));
 
-      const { data: lastResultData, error: rErr } = await supabase
-        .from("team_results")
-        .select("round_number")
-        .eq("session_id", sessionId)
-        .eq("team_id", myTeam.id)
-        .order("round_number", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (rErr) {
-        setError(rErr.message);
-        setLoading(false);
-        return;
-      }
-
-      const lastResult = lastResultData as TeamResultRow | null;
-      const completed = lastResult?.round_number ?? 0;
+      const completed = (lastResultData as TeamResultRow | null)?.round_number ?? 0;
       setCompletedRound(completed);
+      setNextRound(Math.max(Math.min(completed + 1, session.round_count || completed + 1), 1));
 
-      const computedNextRound = Math.min(completed + 1, session.round_count || completed + 1);
-      setNextRound(Math.max(computedNextRound, 1));
+      if (myTeam.scenario_id) {
+        const { data: scenarioData } = await supabase.from("project_scenarios").select("name,client,duration_rounds").eq("id", myTeam.scenario_id).maybeSingle();
+        const scenario = (scenarioData as ScenarioRow | null) ?? null;
+        if (scenario?.name) setScenarioName(scenario.name);
+        if (scenario?.client) setScenarioClient(scenario.client);
+        if ((session.round_count ?? 0) === 0 && scenario?.duration_rounds) setRoundCount(scenario.duration_rounds);
+      }
 
+      await refreshSessionAnalytics(myTeam.id, completed);
       setLoading(false);
     })();
   }, [router, sessionId, supabase]);
 
   useEffect(() => {
     if (loading || !sessionId || nextRound <= 0) return;
-
     let cancelled = false;
-
     const refreshRoundState = async () => {
       const defaultEvents = getRoundConstructionEvents(sessionId, nextRound);
-
-      const { count: totalCount } = await supabase
-        .from("teams")
-        .select("id", { head: true, count: "exact" })
-        .eq("session_id", sessionId);
-
-      const { count: lockedCount } = await supabase
-        .from("decisions")
-        .select("team_id", { head: true, count: "exact" })
-        .eq("session_id", sessionId)
-        .eq("round_number", nextRound)
-        .eq("locked", true);
-
+      const { count: totalCount } = await supabase.from("teams").select("id", { head: true, count: "exact" }).eq("session_id", sessionId);
+      const { count: lockedCount } = await supabase.from("decisions").select("team_id", { head: true, count: "exact" }).eq("session_id", sessionId).eq("round_number", nextRound).eq("locked", true);
       if (!cancelled) {
         setTeamCount(totalCount ?? 0);
         setLockedTeams(lockedCount ?? 0);
       }
 
-      const { data: roundRowData, error: roundErr } = await supabase
-        .from("session_rounds")
-        .select("deadline_at,status,news_payload")
-        .eq("session_id", sessionId)
-        .eq("round_number", nextRound)
-        .maybeSingle();
-
+      const { data: roundRowData, error: roundErr } = await supabase.from("session_rounds").select("deadline_at,status,news_payload").eq("session_id", sessionId).eq("round_number", nextRound).maybeSingle();
       if (roundErr) {
-        if (!isMissingTableError(roundErr.message) && !cancelled) {
-          setError(roundErr.message);
-        }
-
+        if (!isMissingTableError(roundErr.message) && !cancelled) setError(roundErr.message);
         const fallbackDeadline = new Date(Date.now() + DEFAULT_ROUND_WINDOW_MINUTES * 60_000).toISOString();
-
         if (!cancelled) {
           setOrchestrationSource("fallback");
-          setRoundStatus((lockedCount ?? 0) > 0 && (totalCount ?? 0) > 0 && (lockedCount ?? 0) >= (totalCount ?? 0) ? "closed" : "open");
+          setRoundStatus((lockedCount ?? 0) > 0 && (totalCount ?? 0) > 0 && (lockedCount ?? 0) >= (totalCount ?? 0) ? "closed" : "pending");
           setRoundDeadlineIso(fallbackDeadline);
           setRoundShocks(defaultEvents);
         }
@@ -386,7 +293,7 @@ export default function SessionPage() {
       if (!roundRow) {
         if (!cancelled) {
           setOrchestrationSource("shared");
-          setRoundStatus("closed");
+          setRoundStatus("pending");
           setRoundDeadlineIso(null);
           setRoundShocks(defaultEvents);
         }
@@ -395,15 +302,14 @@ export default function SessionPage() {
 
       if (!cancelled) {
         setOrchestrationSource("shared");
-        setRoundStatus(roundRow.status ?? "open");
+        setRoundStatus(roundRow.status ?? "pending");
         setRoundDeadlineIso(roundRow.deadline_at ?? null);
         setRoundShocks(parseRoundEvents(roundRow.news_payload) ?? defaultEvents);
       }
     };
 
-    refreshRoundState();
-    const intervalId = window.setInterval(refreshRoundState, 10000);
-
+    void refreshRoundState();
+    const intervalId = window.setInterval(() => void refreshRoundState(), 10000);
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
@@ -412,23 +318,14 @@ export default function SessionPage() {
 
   useEffect(() => {
     const handleSeen = () => setShowHowToPlayButton(true);
-
     window.addEventListener(HOW_TO_PLAY_SEEN_EVENT, handleSeen);
     return () => window.removeEventListener(HOW_TO_PLAY_SEEN_EVENT, handleSeen);
   }, []);
 
   useEffect(() => {
     if (loading || error || onboardingCheckRef.current) return;
-
     onboardingCheckRef.current = true;
-
-    const hasSeenOnboarding = localStorage.getItem(BHARATINFRA_ONBOARDING_STORAGE_KEY) === "true";
-
-    if (hasSeenOnboarding) {
-      setShowHowToPlayButton(true);
-      return;
-    }
-
+    if (localStorage.getItem(BHARATINFRA_ONBOARDING_STORAGE_KEY) === "true") return void setShowHowToPlayButton(true);
     const openTimer = window.setTimeout(() => openHowToPlay(0), 0);
     return () => window.clearTimeout(openTimer);
   }, [error, loading]);
@@ -437,74 +334,33 @@ export default function SessionPage() {
   const msLeft = roundDeadlineIso && clockNow ? Date.parse(roundDeadlineIso) - clockNow : null;
   const lockWindowExpired = msLeft !== null && msLeft <= 0;
 
-
-    useEffect(() => {
-    if (!isHost || loading || adminBusy || isComplete) return;
-    if (orchestrationSource !== "shared") return;
-    if (roundStatus !== "open" || !lockWindowExpired) return;
-
+  useEffect(() => {
+    if (!isHost || loading || adminBusy || isComplete || orchestrationSource !== "shared" || roundStatus !== "open" || !lockWindowExpired) return;
     const roundKey = sessionId + ":" + nextRound;
     if (autoCloseAttemptKey === roundKey) return;
-
     void closeRoundByHost(true);
-  // closeRoundByHost is intentionally excluded to avoid effect churn on each render.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    adminBusy,
-    autoCloseAttemptKey,
-    isComplete,
-    isHost,
-    loading,
-    lockWindowExpired,
-    nextRound,
-    orchestrationSource,
-    roundStatus,
-    sessionId,
-  ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adminBusy, autoCloseAttemptKey, isComplete, isHost, loading, lockWindowExpired, nextRound, orchestrationSource, roundStatus, sessionId]);
 
-async function autoCloseRoundWithAutolock(closeIso: string): Promise<AutoCloseSummary> {
-    const { data: roundData, error: roundErr } = await supabase
-      .from("session_rounds")
-      .select("deadline_at,news_payload")
-      .eq("session_id", sessionId)
-      .eq("round_number", nextRound)
-      .maybeSingle();
-
+  async function autoCloseRoundWithAutolock(closeIso: string): Promise<AutoCloseSummary> {
+    const { data: roundData, error: roundErr } = await supabase.from("session_rounds").select("deadline_at,news_payload").eq("session_id", sessionId).eq("round_number", nextRound).maybeSingle();
     if (roundErr && !isMissingTableError(roundErr.message)) throw roundErr;
 
     const roundRow = (roundData as SessionRoundRow | null) ?? null;
     const deadlineIso = roundRow?.deadline_at ?? roundDeadlineIso ?? closeIso;
-    const events =
-      parseRoundEvents(roundRow?.news_payload) ??
-      (roundShocks.length > 0 ? roundShocks : getRoundConstructionEvents(sessionId, nextRound));
-
-    const { data: teamsData, error: teamsErr } = await supabase
-      .from("teams")
-      .select("id,kpi_target")
-      .eq("session_id", sessionId);
-
+    const events = parseRoundEvents(roundRow?.news_payload) ?? (roundShocks.length > 0 ? roundShocks : getRoundConstructionEvents(sessionId, nextRound));
+    const { data: teamsData, error: teamsErr } = await supabase.from("teams").select("id,kpi_target").eq("session_id", sessionId);
     if (teamsErr) throw teamsErr;
 
     const teams = (teamsData ?? []) as SessionTeamRow[];
-
     let autoLockedTeams = 0;
     let generatedResults = 0;
     let preservedLockedTeams = 0;
     let totalLatePenalty = 0;
 
     for (const team of teams) {
-      const teamId = team.id;
-
-      const { data: decisionData, error: decisionErr } = await supabase
-        .from("decisions")
-        .select(
-          "focus_cost,focus_quality,focus_stakeholder,focus_speed,risk_appetite,governance_intensity,buffer_percent,vendor_strategy,locked,raw"
-        )
-        .eq("session_id", sessionId)
-        .eq("team_id", teamId)
-        .eq("round_number", nextRound)
-        .maybeSingle();
-
+      const activeTeamId = team.id;
+      const { data: decisionData, error: decisionErr } = await supabase.from("decisions").select("focus_cost,focus_quality,focus_stakeholder,focus_speed,risk_appetite,governance_intensity,buffer_percent,vendor_strategy,locked,raw").eq("session_id", sessionId).eq("team_id", activeTeamId).eq("round_number", nextRound).maybeSingle();
       if (decisionErr) throw decisionErr;
 
       const currentDecision = (decisionData as DecisionRow | null) ?? null;
@@ -517,18 +373,8 @@ async function autoCloseRoundWithAutolock(closeIso: string): Promise<AutoCloseSu
         profile = parseDecisionProfile(currentDecision.raw);
         autoLockSource = currentDecision.locked ? "already_locked" : "existing_draft";
       } else if (nextRound > 1) {
-        const { data: prevDecisionData, error: prevDecisionErr } = await supabase
-          .from("decisions")
-          .select(
-            "focus_cost,focus_quality,focus_stakeholder,focus_speed,risk_appetite,governance_intensity,buffer_percent,vendor_strategy,locked,raw"
-          )
-          .eq("session_id", sessionId)
-          .eq("team_id", teamId)
-          .eq("round_number", nextRound - 1)
-          .maybeSingle();
-
+        const { data: prevDecisionData, error: prevDecisionErr } = await supabase.from("decisions").select("focus_cost,focus_quality,focus_stakeholder,focus_speed,risk_appetite,governance_intensity,buffer_percent,vendor_strategy,locked,raw").eq("session_id", sessionId).eq("team_id", activeTeamId).eq("round_number", nextRound - 1).maybeSingle();
         if (prevDecisionErr) throw prevDecisionErr;
-
         const prevDecision = (prevDecisionData as DecisionRow | null) ?? null;
         if (prevDecision) {
           decision = buildDecisionFromRow(prevDecision);
@@ -538,40 +384,22 @@ async function autoCloseRoundWithAutolock(closeIso: string): Promise<AutoCloseSu
       }
 
       if (!currentDecision || !currentDecision.locked) {
-        const { error: autoLockErr } = await supabase.from("decisions").upsert(
-          {
-            session_id: sessionId,
-            team_id: teamId,
-            round_number: nextRound,
-            ...decision,
-            raw: {
-              ...profile,
-              auto_locked: true,
-              auto_lock_source: autoLockSource,
-              auto_locked_by: viewerUserId,
-              auto_locked_at: closeIso,
-              auto_lock_reason: "host_round_close",
-            },
-            locked: true,
-            submitted_at: closeIso,
-          },
-          { onConflict: "session_id,team_id,round_number" }
-        );
-
+        const { error: autoLockErr } = await supabase.from("decisions").upsert({
+          session_id: sessionId,
+          team_id: activeTeamId,
+          round_number: nextRound,
+          ...decision,
+          raw: { ...profile, auto_locked: true, auto_lock_source: autoLockSource, auto_locked_by: viewerUserId, auto_locked_at: closeIso, auto_lock_reason: "host_round_close" },
+          locked: true,
+          submitted_at: closeIso,
+        }, { onConflict: "session_id,team_id,round_number" });
         if (autoLockErr) throw autoLockErr;
         autoLockedTeams += 1;
       } else {
         preservedLockedTeams += 1;
       }
 
-      const { data: existingResultData, error: existingResultErr } = await supabase
-        .from("team_results")
-        .select("schedule_index")
-        .eq("session_id", sessionId)
-        .eq("team_id", teamId)
-        .eq("round_number", nextRound)
-        .maybeSingle();
-
+      const { data: existingResultData, error: existingResultErr } = await supabase.from("team_results").select("schedule_index").eq("session_id", sessionId).eq("team_id", activeTeamId).eq("round_number", nextRound).maybeSingle();
       if (existingResultErr) throw existingResultErr;
       if (existingResultData) continue;
 
@@ -579,62 +407,23 @@ async function autoCloseRoundWithAutolock(closeIso: string): Promise<AutoCloseSu
       let prevProfile: DecisionProfile | null = null;
 
       if (nextRound > 1) {
-        const { data: prevResultData, error: prevResultErr } = await supabase
-          .from("team_results")
-          .select(
-            "schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,detail"
-          )
-          .eq("session_id", sessionId)
-          .eq("team_id", teamId)
-          .eq("round_number", nextRound - 1)
-          .maybeSingle();
-
+        const { data: prevResultData, error: prevResultErr } = await supabase.from("team_results").select("schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,detail").eq("session_id", sessionId).eq("team_id", activeTeamId).eq("round_number", nextRound - 1).maybeSingle();
         if (prevResultErr) throw prevResultErr;
-
         if (prevResultData) {
           const prevRow = prevResultData as TeamResultFullRow;
-          prevResult = {
-            schedule_index: prevRow.schedule_index,
-            cost_index: prevRow.cost_index,
-            cash_closing: prevRow.cash_closing,
-            quality_score: prevRow.quality_score,
-            safety_score: prevRow.safety_score,
-            stakeholder_score: prevRow.stakeholder_score,
-            claim_entitlement_score: prevRow.claim_entitlement_score,
-            points_earned: prevRow.points_earned,
-            penalties: prevRow.penalties,
-            detail: prevRow.detail ?? {},
-          };
+          prevResult = { schedule_index: prevRow.schedule_index, cost_index: prevRow.cost_index, cash_closing: prevRow.cash_closing, quality_score: prevRow.quality_score, safety_score: prevRow.safety_score, stakeholder_score: prevRow.stakeholder_score, claim_entitlement_score: prevRow.claim_entitlement_score, points_earned: prevRow.points_earned, penalties: prevRow.penalties, detail: prevRow.detail ?? {} };
         }
-
-        const { data: prevDecisionRawData, error: prevDecisionRawErr } = await supabase
-          .from("decisions")
-          .select("raw")
-          .eq("session_id", sessionId)
-          .eq("team_id", teamId)
-          .eq("round_number", nextRound - 1)
-          .maybeSingle();
-
+        const { data: prevDecisionRawData, error: prevDecisionRawErr } = await supabase.from("decisions").select("raw").eq("session_id", sessionId).eq("team_id", activeTeamId).eq("round_number", nextRound - 1).maybeSingle();
         if (prevDecisionRawErr) throw prevDecisionRawErr;
-        const prevRaw = (prevDecisionRawData as { raw?: Record<string, unknown> | null } | null)?.raw ?? null;
-        prevProfile = parseDecisionProfile(prevRaw);
+        prevProfile = parseDecisionProfile((prevDecisionRawData as { raw?: Record<string, unknown> | null } | null)?.raw ?? null);
       }
 
-      const seed = sessionId + ":" + teamId + ":" + nextRound;
-      const computed = computeRoundResultV2(decision, seed, {
-        profile,
-        prevResult,
-        prevProfile,
-        events,
-      });
-
+      const computed = computeRoundResultV2(decision, sessionId + ":" + activeTeamId + ":" + nextRound, { profile, prevResult, prevProfile, events });
       const kpiTarget = parseKpiTarget(team.kpi_target);
       const kpiEval = evaluateKpiAchievement(kpiTarget, computed);
       const boostedPoints = applyKpiMultiplier(computed.points_earned, kpiEval.achieved);
-
       const latePenalty = computeLatePenalty(deadlineIso, closeIso);
       totalLatePenalty += latePenalty.pointsPenalty;
-
       const finalPoints = Math.max(0, boostedPoints - latePenalty.pointsPenalty);
       const finalStakeholder = clamp(computed.stakeholder_score - latePenalty.stakeholderPenalty, 0, 100);
 
@@ -646,137 +435,67 @@ async function autoCloseRoundWithAutolock(closeIso: string): Promise<AutoCloseSu
         detail: {
           ...computed.detail,
           events,
-          auto_lock: {
-            source: autoLockSource,
-            by_user: viewerUserId,
-            at: closeIso,
-            reason: "host_round_close",
-          },
-          timeliness: {
-            deadline_at: deadlineIso,
-            submitted_at: closeIso,
-            minutes_late: latePenalty.minutesLate,
-            points_penalty: latePenalty.pointsPenalty,
-            stakeholder_penalty: latePenalty.stakeholderPenalty,
-            extension_mode: latePenalty.extensionMode,
-          },
-          kpi: {
-            target: kpiTarget,
-            achieved: kpiEval.achieved,
-            metric: kpiEval.metricKey,
-            actual: kpiEval.actual,
-            threshold: kpiEval.threshold,
-            threshold_label: kpiEval.thresholdLabel,
-            base_points: computed.points_earned,
-            multiplied_points: boostedPoints,
-            late_points_penalty: latePenalty.pointsPenalty,
-            final_points: finalPoints,
-            multiplier: kpiEval.achieved ? 4 : 1,
-          },
+          auto_lock: { source: autoLockSource, by_user: viewerUserId, at: closeIso, reason: "host_round_close" },
+          timeliness: { deadline_at: deadlineIso, submitted_at: closeIso, minutes_late: latePenalty.minutesLate, points_penalty: latePenalty.pointsPenalty, stakeholder_penalty: latePenalty.stakeholderPenalty, extension_mode: latePenalty.extensionMode },
+          kpi: { target: kpiTarget, achieved: kpiEval.achieved, metric: kpiEval.metricKey, actual: kpiEval.actual, threshold: kpiEval.threshold, threshold_label: kpiEval.thresholdLabel, base_points: computed.points_earned, multiplied_points: boostedPoints, late_points_penalty: latePenalty.pointsPenalty, final_points: finalPoints, multiplier: kpiEval.achieved ? 4 : 1 },
         },
       };
 
-      const { error: resultErr } = await supabase.from("team_results").upsert(
-        {
-          session_id: sessionId,
-          team_id: teamId,
-          round_number: nextRound,
-          schedule_index: finalResult.schedule_index,
-          cost_index: finalResult.cost_index,
-          cash_closing: finalResult.cash_closing,
-          quality_score: finalResult.quality_score,
-          safety_score: finalResult.safety_score,
-          stakeholder_score: finalResult.stakeholder_score,
-          claim_entitlement_score: finalResult.claim_entitlement_score,
-          points_earned: finalResult.points_earned,
-          penalties: finalResult.penalties,
-          detail: finalResult.detail,
-        },
-        { onConflict: "session_id,team_id,round_number" }
-      );
-
+      const { error: resultErr } = await supabase.from("team_results").upsert({
+        session_id: sessionId,
+        team_id: activeTeamId,
+        round_number: nextRound,
+        schedule_index: finalResult.schedule_index,
+        cost_index: finalResult.cost_index,
+        cash_closing: finalResult.cash_closing,
+        quality_score: finalResult.quality_score,
+        safety_score: finalResult.safety_score,
+        stakeholder_score: finalResult.stakeholder_score,
+        claim_entitlement_score: finalResult.claim_entitlement_score,
+        points_earned: finalResult.points_earned,
+        penalties: finalResult.penalties,
+        detail: finalResult.detail,
+      }, { onConflict: "session_id,team_id,round_number" });
       if (resultErr) throw resultErr;
       generatedResults += 1;
     }
 
-    const { data: scoreRowsData, error: scoreErr } = await supabase
-      .from("team_results")
-      .select("team_id,points_earned")
-      .eq("session_id", sessionId);
-
+    const { data: scoreRowsData, error: scoreErr } = await supabase.from("team_results").select("team_id,points_earned").eq("session_id", sessionId);
     if (scoreErr) throw scoreErr;
-
-    const scoreRows = (scoreRowsData ?? []) as TeamScoreRow[];
     const totals = new Map<string, number>();
-
-    for (const row of scoreRows) {
-      totals.set(row.team_id, (totals.get(row.team_id) ?? 0) + (row.points_earned ?? 0));
-    }
-
+    for (const row of (scoreRowsData ?? []) as TeamScoreRow[]) totals.set(row.team_id, (totals.get(row.team_id) ?? 0) + (row.points_earned ?? 0));
     for (const team of teams) {
-      const { error: totalErr } = await supabase
-        .from("teams")
-        .update({ total_points: totals.get(team.id) ?? 0 })
-        .eq("id", team.id);
-
+      const { error: totalErr } = await supabase.from("teams").update({ total_points: totals.get(team.id) ?? 0 }).eq("id", team.id);
       if (totalErr) throw totalErr;
     }
 
     setTeamCount(teams.length);
     setLockedTeams(teams.length);
-
-    return {
-      autoLockedTeams,
-      generatedResults,
-      preservedLockedTeams,
-      totalLatePenalty,
-    };
+    return { autoLockedTeams, generatedResults, preservedLockedTeams, totalLatePenalty };
   }
+
   async function openRoundByHost() {
     if (!isHost || !sessionId || !viewerUserId) return;
-
     setAdminBusy(true);
     setAdminMessage("");
     setError("");
-
     try {
       const events = roundShocks.length > 0 ? roundShocks : getRoundConstructionEvents(sessionId, nextRound);
       const deadlineIso = new Date(Date.now() + DEFAULT_ROUND_WINDOW_MINUTES * 60_000).toISOString();
-
-      const { error: upErr } = await supabase.from("session_rounds").upsert(
-        {
-          session_id: sessionId,
-          round_number: nextRound,
-          status: "open",
-          deadline_at: deadlineIso,
-          news_payload: events,
-          created_by: viewerUserId,
-          closed_at: null,
-          closed_by: null,
-        },
-        { onConflict: "session_id,round_number" }
-      );
-
+      const { error: upErr } = await supabase.from("session_rounds").upsert({ session_id: sessionId, round_number: nextRound, status: "open", deadline_at: deadlineIso, news_payload: events, created_by: viewerUserId, closed_at: null, closed_by: null }, { onConflict: "session_id,round_number" });
       if (upErr) throw upErr;
-
-      const { error: sessErr } = await supabase
-        .from("sessions")
-        .update({ status: "in_progress" })
-        .eq("id", sessionId);
-
+      const { error: sessErr } = await supabase.from("sessions").update({ status: "in_progress" }).eq("id", sessionId);
       if (sessErr) throw sessErr;
-
       setStatus("in_progress");
       setRoundStatus("open");
       setRoundDeadlineIso(deadlineIso);
       setRoundShocks(events);
       setOrchestrationSource("shared");
-      setAdminMessage(`Round ${nextRound} opened. Teams can start decisions.`);
+      setAdminMessage(`Round ${nextRound} opened. Teams can now submit decisions.`);
       setLastAutoCloseSummary(null);
       setAutoCloseAttemptKey("");
     } catch (unknownError: unknown) {
-      const message = unknownError instanceof Error ? unknownError.message : "Failed to open round";
-      setError(message);
+      setError(unknownError instanceof Error ? unknownError.message : "Failed to open round");
     } finally {
       setAdminBusy(false);
     }
@@ -784,274 +503,210 @@ async function autoCloseRoundWithAutolock(closeIso: string): Promise<AutoCloseSu
 
   async function closeRoundByHost(autoTriggered = false) {
     if (!isHost || !sessionId || !viewerUserId) return;
-
     const roundKey = sessionId + ":" + nextRound;
-
     setAdminBusy(true);
     setAdminMessage("");
     setError("");
     setAutoCloseAttemptKey(roundKey);
-
     try {
       const nowIso = new Date().toISOString();
       const summary = await autoCloseRoundWithAutolock(nowIso);
       setLastAutoCloseSummary(summary);
-
-      const { error: roundErr } = await supabase
-        .from("session_rounds")
-        .update({ status: "closed", closed_at: nowIso, closed_by: viewerUserId })
-        .eq("session_id", sessionId)
-        .eq("round_number", nextRound);
-
+      const { error: roundErr } = await supabase.from("session_rounds").update({ status: "closed", closed_at: nowIso, closed_by: viewerUserId }).eq("session_id", sessionId).eq("round_number", nextRound);
       if (roundErr && !isMissingTableError(roundErr.message)) throw roundErr;
 
       const updatedRound = Math.max(sessionCurrentRound, nextRound);
       const nextStatus = updatedRound >= roundCount ? "complete" : "in_progress";
-
-      const { error: sessErr } = await supabase
-        .from("sessions")
-        .update({ current_round: updatedRound, status: nextStatus })
-        .eq("id", sessionId);
-
+      const { error: sessErr } = await supabase.from("sessions").update({ current_round: updatedRound, status: nextStatus }).eq("id", sessionId);
       if (sessErr) throw sessErr;
 
       setSessionCurrentRound(updatedRound);
+      setCompletedRound(updatedRound);
       setStatus(nextStatus);
       setRoundStatus("closed");
+      if (updatedRound < roundCount) setNextRound(updatedRound + 1);
+      if (teamId) await refreshSessionAnalytics(teamId, updatedRound);
 
-      if (updatedRound < roundCount) {
-        const candidateRound = updatedRound + 1;
-        setNextRound(candidateRound);
-      }
-
-      const summaryText =
-        "Auto-locked " +
-        summary.autoLockedTeams +
-        " teams, generated " +
-        summary.generatedResults +
-        " results" +
-        (summary.totalLatePenalty > 0 ? ", timeliness penalties " + summary.totalLatePenalty + " pts." : ".");
-
-      setAdminMessage(
-        (autoTriggered ? "Deadline reached. " : "") +
-          "Round " +
-          nextRound +
-          " closed. " +
-          summaryText
-      );
+      const summaryText = `Auto-locked ${summary.autoLockedTeams} teams and generated ${summary.generatedResults} results${summary.totalLatePenalty > 0 ? `, applying ${summary.totalLatePenalty} late-penalty points.` : "."}`;
+      setAdminMessage(`${autoTriggered ? "Deadline reached. " : ""}Round ${nextRound} closed. ${summaryText}`);
     } catch (unknownError: unknown) {
-      const message = unknownError instanceof Error ? unknownError.message : "Failed to close round";
-      setError(message);
+      setError(unknownError instanceof Error ? unknownError.message : "Failed to close round");
     } finally {
       setAdminBusy(false);
     }
   }
-  async function extendDeadlineByHost(minutes = 10) {
-    if (!isHost || !sessionId) return;
 
+  async function extendDeadlineByHost(minutes = 30) {
+    if (!isHost || !sessionId) return;
     setAdminBusy(true);
     setAdminMessage("");
     setError("");
-
     try {
       const now = Date.now();
       const baseMs = roundDeadlineIso ? Date.parse(roundDeadlineIso) : now;
       const effectiveBase = Number.isFinite(baseMs) ? Math.max(baseMs, now) : now;
       const nextDeadlineIso = new Date(effectiveBase + minutes * 60_000).toISOString();
-
-      const { error: upErr } = await supabase.from("session_rounds").upsert(
-        {
-          session_id: sessionId,
-          round_number: nextRound,
-          status: "open",
-          deadline_at: nextDeadlineIso,
-        },
-        { onConflict: "session_id,round_number" }
-      );
-
+      const { error: upErr } = await supabase.from("session_rounds").upsert({ session_id: sessionId, round_number: nextRound, status: "open", deadline_at: nextDeadlineIso }, { onConflict: "session_id,round_number" });
       if (upErr) throw upErr;
-
       setRoundDeadlineIso(nextDeadlineIso);
       setRoundStatus("open");
       setOrchestrationSource("shared");
-      setAdminMessage(`Deadline extended by ${minutes} minutes.`);
+      setAdminMessage(`Round extended by ${minutes} minutes.`);
     } catch (unknownError: unknown) {
-      const message = unknownError instanceof Error ? unknownError.message : "Failed to extend deadline";
-      setError(message);
+      setError(unknownError instanceof Error ? unknownError.message : "Failed to extend deadline");
     } finally {
       setAdminBusy(false);
     }
   }
 
-  const roundsList: RoundNode[] = [];
-  for (let i = 1; i <= roundCount; i++) {
-    let state: RoundState = "pending";
-    if (i < nextRound) state = "completed";
-    else if (i === nextRound && roundStatus === "open") state = "active";
-    else if (i === nextRound && roundStatus === "closed") state = "locked";
-
-    roundsList.push({
-      round_number: i,
-      state,
-      label: i === nextRound ? (roundStatus === "open" ? "Awaiting your strategic move." : "Move locked. Awaiting Game Master.") : i < nextRound ? "Round completed." : "Future operations phase.",
-    });
-  }
-
-  function handleEnterRound(rNum: number) {
-    router.push(`/sessions/${sessionId}/round/${rNum}`);
-  }
+  const currentTeamEntry = leaderboard.find((entry) => entry.id === teamId) ?? null;
+  const displayRound = isComplete ? Math.max(roundCount, 1) : Math.max(nextRound, 1);
+  const activeTimer = roundStatus === "open" && msLeft !== null ? formatClock(msLeft) : "00:00";
+  const roundTitle = isComplete ? "Simulation complete" : roundStatus === "open" ? `Round ${displayRound} is Open` : roundStatus === "closed" ? "Round closed - results being calculated" : "Waiting for facilitator to open round";
+  const roundSubtitle = isComplete
+    ? "All rounds are closed and final standings are now available."
+    : roundStatus === "open"
+      ? "Decision window is live. Lock your choices before the timer runs out."
+      : roundStatus === "closed"
+        ? "The facilitator has closed this round. Updated standings will appear as soon as scoring finishes."
+        : "The next decision window will begin once the facilitator starts the round.";
+  const roundTone = isComplete ? "success" : roundStatus === "open" ? "success" : roundStatus === "closed" ? "neutral" : "warning";
+  const metricTone = (value: number | null, threshold: number) => (value === null ? "neutral" : value >= threshold ? "success" : "danger") as "neutral" | "success" | "danger";
+  const pointsTone = (value: number | null) => (value === null ? "neutral" : value >= 0 ? "success" : "danger") as "neutral" | "success" | "danger";
+  const metricValue = (value: number | null, decimals = 0) => value === null ? "—" : decimals > 0 ? value.toFixed(decimals) : Math.round(value).toString();
 
   return (
     <RequireAuth>
-      <div className="flex w-full flex-col gap-6 lg:flex-row lg:items-start">
-        {/* Main Content (Missions / Stepper) */}
-        <div className="flex-1 space-y-6">
+      <Page>
+        <div className="space-y-6">
           <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-3xl font-black tracking-tight text-white uppercase">Mission Control</h1>
-              <p className="mt-1 text-sm text-blue-400/80 uppercase tracking-widest font-semibold">{sessionName || "Loading..."} // CODE: {code}</p>
-            </div>
-            <div className="flex items-center gap-3">
-              {showHowToPlayButton ? (
-                <Button
-                  variant="secondary"
-                  onClick={() => openHowToPlay(0)}
-                  className="rounded-full border-teal-400/25 bg-teal-500/10 px-4 py-2 text-[11px] text-teal-100 hover:border-teal-300/40 hover:bg-teal-500/20"
-                >
-                  How to Play
-                </Button>
-              ) : null}
-              <Link className="text-sm font-bold text-slate-400 hover:text-white" href="/dashboard">
-                [ RETURN TO ARENA ]
-              </Link>
-            </div>
+            <Link href="/dashboard" className="text-sm font-semibold text-slate-400 transition hover:text-white">Back to dashboard</Link>
+            <span className="text-sm text-slate-500">Session code {code || "—"}</span>
           </div>
 
-          {error ? (
-            <div className="rounded-lg border border-rose-500/50 bg-rose-500/10 p-4 text-sm font-semibold text-rose-400 shadow-inner">{error}</div>
-          ) : null}
+          {error ? <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 px-5 py-4 text-sm font-semibold text-rose-100">{error}</div> : null}
 
           {loading ? (
-            <div className="animate-pulse rounded-xl border border-slate-800 bg-slate-900/50 p-6">
-              <div className="h-6 w-1/3 rounded bg-slate-800"></div>
-            </div>
+            <Card variant="elevated"><CardBody className="space-y-4 p-6"><div className="h-8 w-1/3 animate-pulse rounded bg-white/10" /><div className="h-24 animate-pulse rounded-2xl bg-white/5" /></CardBody></Card>
           ) : (
-            <Card>
-              <CardHeader title="Operational Timeline" subtitle="Proceed through the strategic phases." />
-              <CardBody>
-                {isComplete ? (
-                   <div className="mb-6 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4 text-sm font-bold text-emerald-400">
-                     MISSION CRITICAL OBJECTIVES ACHIEVED. RETURN TO ARENA.
-                   </div>
-                ) : null}
-                <RoundStepper rounds={roundsList} currentRoundId={nextRound} onEnterRound={handleEnterRound} />
-              </CardBody>
-            </Card>
-          )}
-        </div>
-
-        {/* Sidebar Info */}
-        {!loading && (
-          <div className="w-full shrink-0 space-y-6 lg:w-[320px]">
-            <Card>
-              <CardHeader title="Team Telemetry" />
-              <CardBody className="space-y-4">
-                <div>
-                  <div className="text-[10px] uppercase tracking-widest text-slate-500">Callsign</div>
-                  <div className="font-mono text-lg font-bold text-white">{teamName}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-widest text-slate-500">Current XP</div>
-                  <div className="font-mono text-xl font-black text-blue-400">{points}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-widest text-slate-500">Active KPI Lock</div>
-                  <div className="text-sm font-semibold text-emerald-400">{teamKpi}</div>
-                </div>
-              </CardBody>
-            </Card>
-
-            {isHost && (
-              <Card className="border-amber-300/40 bg-gradient-to-br from-amber-300/12 via-amber-100/6 to-slate-950/95">
-                <CardHeader
-                  title="Facilitator Controls"
-                  subtitle="Round operations, shock preview, and exports are visible only to the session facilitator."
-                  className="border-amber-300/20"
-                />
-                <CardBody className="space-y-4">
-                  <div className="rounded-2xl border border-amber-300/20 bg-slate-950/60 p-4">
-                    <div className="text-[10px] uppercase tracking-widest text-amber-200/80">Round Lock Status</div>
-                    <div className="mt-2 text-sm font-semibold text-white">
-                      {lockedTeams} / {teamCount} teams locked for Round {nextRound}
+            <>
+              <Card variant="elevated">
+                <CardBody className="grid gap-6 p-6 lg:grid-cols-[1fr_auto_1fr] lg:items-center">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <h1 className="text-heading-2 text-white">{scenarioName}</h1>
+                      <Badge tone="neutral">{scenarioClient}</Badge>
                     </div>
+                    <div className="mt-2 text-sm text-slate-400">{sessionName || "Simulation session"}</div>
                   </div>
-
-                  <div className="space-y-3 rounded-2xl border border-amber-300/20 bg-slate-950/60 p-4">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-widest text-amber-200/80">Shock Preview</div>
-                      <div className="mt-1 text-xs text-slate-300">Preview the first few live events before you open or extend the round.</div>
+                  <div className="flex min-w-[260px] flex-col items-center gap-4">
+                    <div className="text-center">
+                      <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-300">Round Progress</div>
+                      <div className="mt-2 text-3xl font-black text-white">Round {displayRound} of {Math.max(roundCount, 1)}</div>
                     </div>
-
-                    {roundShocks.length === 0 ? (
-                      <div className="text-xs italic text-slate-400">No anomalies detected.</div>
-                    ) : (
-                      roundShocks.slice(0, 3).map((event) => (
-                        <div key={event.id} className="rounded border border-amber-300/15 bg-slate-900/70 p-3">
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="text-sm font-bold text-white line-clamp-1">{event.title}</div>
-                            <span className={`rounded px-1.5 py-0.5 text-[9px] font-black ${event.severity >= 3 ? "bg-rose-500/20 text-rose-300" : event.severity === 2 ? "bg-amber-500/20 text-amber-200" : "bg-sky-500/20 text-sky-200"}`}>
-                              S{event.severity}
-                            </span>
+                    <div className="flex items-center gap-3">
+                      {Array.from({ length: Math.max(roundCount, 1) }, (_, index) => {
+                        const roundNumber = index + 1;
+                        const complete = roundNumber < displayRound;
+                        const current = roundNumber === displayRound;
+                        return (
+                          <div key={roundNumber} className="flex items-center gap-3">
+                            <div className={`h-3.5 w-3.5 rounded-full border ${complete ? "border-amber-300 bg-amber-400" : current ? "border-amber-300 bg-amber-500" : "border-white/20 bg-transparent"}`} />
+                            {roundNumber < Math.max(roundCount, 1) ? <div className={`h-[2px] w-10 ${complete ? "bg-amber-400" : "bg-white/10"}`} /> : null}
                           </div>
-                          <div className="mt-1 text-xs text-slate-300 line-clamp-3">{event.description}</div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-
-                  <div className="grid gap-3">
-                    <Button
-                      variant="secondary"
-                      onClick={openRoundByHost}
-                      disabled={adminBusy || isComplete || roundStatus === "open"}
-                      className="w-full border-amber-700/50 text-amber-300 hover:bg-amber-900/20 hover:text-amber-200"
-                    >
-                      {adminBusy ? "Working..." : `Open Round ${nextRound}`}
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      onClick={() => void closeRoundByHost()}
-                      disabled={adminBusy || isComplete || roundStatus === "closed"}
-                      className="w-full border-rose-700/50 text-rose-300 hover:bg-rose-900/20 hover:text-rose-200"
-                    >
-                      {adminBusy ? "Working..." : `Close Round ${nextRound}`}
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      onClick={() => void extendDeadlineByHost(10)}
-                      disabled={adminBusy || isComplete || roundStatus !== "open"}
-                      className="w-full border-yellow-600/40 text-yellow-200 hover:bg-yellow-900/20 hover:text-yellow-100"
-                    >
-                      {adminBusy ? "Working..." : "Extend Round +10 min"}
-                    </Button>
-                    <Link href={`/sessions/${sessionId}/report`} className="block w-full">
-                      <Button variant="secondary" className="w-full border-white/15 text-slate-100 hover:border-amber-300/30 hover:bg-white/10">
-                        Open Metrics & Export CSV
-                      </Button>
-                    </Link>
-                  </div>
-
-                  {adminMessage && (
-                    <div className="rounded bg-slate-900/90 p-2 text-[10px] font-mono text-amber-300">
-                      &gt; {adminMessage}
+                        );
+                      })}
                     </div>
-                  )}
+                  </div>
+                  <div className="flex flex-col gap-3 lg:items-end">
+                    <div className="text-heading-3 text-white">{teamName}</div>
+                    <Badge tone="info">Rank {currentTeamEntry?.currentRank ?? 1} of {Math.max(teamCount, 1)}</Badge>
+                    <div className="text-sm text-slate-400">Primary KPI: {teamKpi}</div>
+                  </div>
                 </CardBody>
               </Card>
-            )}
-          </div>
-        )}
-      </div>
+
+              <Card variant="elevated">
+                <CardBody className="space-y-6 p-6">
+                  <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-3">
+                        <span className={`h-3.5 w-3.5 rounded-full ${roundTone === "success" ? "bg-emerald-400 animate-pulse" : roundTone === "warning" ? "bg-amber-400" : "bg-slate-400"}`} />
+                        <span className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-400">Round Status</span>
+                      </div>
+                      <div>
+                        <div className="text-heading-2 text-white">{roundTitle}</div>
+                        <p className="mt-3 max-w-3xl text-body text-brand-muted">{roundSubtitle}</p>
+                      </div>
+                    </div>
+                    <div className="min-w-[220px] rounded-[24px] border border-white/10 bg-slate-950/60 px-6 py-5 text-center">
+                      <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-500">Countdown</div>
+                      <div className="mt-3 text-[2.75rem] font-black tracking-[-0.06em] text-white">{activeTimer}</div>
+                      <div className="mt-2 text-sm text-slate-400">{roundStatus === "open" ? "Round closes at the facilitator deadline" : "Timer activates when the round opens"}</div>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-3 sm:flex-row">
+                    <Link href={`/sessions/${sessionId}/round/${displayRound}`} className="block">
+                      <Button className="w-full rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 hover:from-amber-300 hover:to-orange-400">Enter Round Workspace</Button>
+                    </Link>
+                    <Link href={`/sessions/${sessionId}/report`} className="block">
+                      <Button variant="ghost" className="w-full rounded-2xl border border-white/10 bg-white/5 text-white hover:border-white/20 hover:bg-white/10">View Report</Button>
+                    </Link>
+                    {showHowToPlayButton ? <Button variant="secondary" onClick={() => openHowToPlay(0)} className="rounded-2xl border-white/10 bg-white/5 text-white hover:border-white/20 hover:bg-white/10">How to Play</Button> : null}
+                  </div>
+                </CardBody>
+              </Card>
+
+              <div className="grid gap-4 md:grid-cols-4">
+                <MetricTile label="SPI" value={metricValue(previousMetrics.spi, 2)} helper="Last round schedule index" tone={metricTone(previousMetrics.spi, 1)} />
+                <MetricTile label="CPI" value={metricValue(previousMetrics.cpi, 2)} helper="Last round cost index" tone={metricTone(previousMetrics.cpi, 1)} />
+                <MetricTile label="Safety" value={metricValue(previousMetrics.safety)} helper="Last round safety score" tone={metricTone(previousMetrics.safety, 85)} />
+                <MetricTile label="Points" value={metricValue(previousMetrics.points)} helper="Points earned last round" tone={pointsTone(previousMetrics.points)} />
+              </div>
+
+              <div className={`grid gap-6 ${isHost ? "xl:grid-cols-[minmax(0,1fr)_320px]" : ""}`}>
+                <Card variant="elevated">
+                  <CardBody className="space-y-5 p-6">
+                    <div className="flex items-center justify-between">
+                      <div><div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-300">Leaderboard</div><div className="mt-2 text-heading-3 text-white">Current standings</div></div>
+                      <Badge tone="neutral">{teamCount} teams</Badge>
+                    </div>
+                    <div className="space-y-3">
+                      {leaderboard.map((entry) => {
+                        const direction = entry.currentRank < entry.previousRank ? "up" : entry.currentRank > entry.previousRank ? "down" : "flat";
+                        const isCurrent = entry.id === teamId;
+                        return (
+                          <div key={entry.id} className={`grid grid-cols-[56px_minmax(0,1fr)_auto] items-center gap-4 rounded-2xl border px-4 py-4 ${isCurrent ? "border-teal-400/25 border-l-4 border-l-teal-400 bg-teal-500/10" : "border-white/10 bg-white/5"}`}>
+                            <div className="text-2xl font-black text-white">{entry.currentRank}</div>
+                            <div className="min-w-0"><div className="truncate text-base font-semibold text-white">{entry.teamName}</div><div className="mt-1 text-sm text-slate-400">{isCurrent ? "Your team" : "Competitor team"}</div></div>
+                            <div className="flex flex-col items-end gap-2"><div className="text-lg font-black text-white">{entry.totalPoints}</div><DeltaArrow direction={direction} /></div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </CardBody>
+                </Card>
+
+                {isHost ? (
+                  <Card variant="elevated" className="border-amber-300/20 bg-gradient-to-br from-amber-500/10 via-slate-950 to-slate-950">
+                    <CardBody className="space-y-5 p-6">
+                      <div><div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-300">Facilitator Controls</div><div className="mt-2 text-heading-3 text-white">Session operations</div><p className="mt-2 text-sm text-slate-300">Keep rounds moving without pulling focus away from the main hub.</p></div>
+                      <div className="rounded-2xl border border-amber-300/20 bg-slate-950/50 px-4 py-4 text-sm text-slate-200">{lockedTeams} of {teamCount} teams locked for round {displayRound}</div>
+                      <div className="grid gap-3">
+                        <Button variant="secondary" onClick={openRoundByHost} disabled={adminBusy || isComplete || roundStatus === "open"} className="rounded-2xl border-amber-300/20 bg-amber-500/10 text-amber-100 hover:border-amber-300/30 hover:bg-amber-500/15">{adminBusy ? "Working..." : "Open Round"}</Button>
+                        <Button variant="secondary" onClick={() => void closeRoundByHost()} disabled={adminBusy || isComplete || roundStatus === "closed"} className="rounded-2xl border-white/10 bg-white/5 text-white hover:border-white/20 hover:bg-white/10">{adminBusy ? "Working..." : "Close Round"}</Button>
+                        <Button variant="secondary" onClick={() => void extendDeadlineByHost(30)} disabled={adminBusy || isComplete || roundStatus !== "open"} className="rounded-2xl border-white/10 bg-white/5 text-white hover:border-white/20 hover:bg-white/10">{adminBusy ? "Working..." : "Extend (30 min)"}</Button>
+                      </div>
+                      {adminMessage ? <div className="rounded-2xl border border-amber-300/20 bg-slate-950/60 px-4 py-3 text-sm text-amber-100">{adminMessage}</div> : null}
+                      {lastAutoCloseSummary ? <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200">Auto-close summary: {lastAutoCloseSummary.generatedResults} results generated, {lastAutoCloseSummary.autoLockedTeams} teams auto-locked.</div> : null}
+                    </CardBody>
+                  </Card>
+                ) : null}
+              </div>
+            </>
+          )}
+        </div>
+      </Page>
     </RequireAuth>
   );
 }
