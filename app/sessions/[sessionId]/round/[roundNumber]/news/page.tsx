@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
+import { formatStatus } from "@/lib/formatters";
 import { getSupabaseClient } from "@/lib/supabaseClient";
 import { ConstructionEvent, getRoundConstructionEvents } from "@/lib/constructionNews";
 import { getNewsImageUrl } from "@/lib/newsVisuals";
@@ -177,7 +178,7 @@ export default function RoundNewsPage() {
               <CardBody className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="text-slate-500">Round status</div>
-                  <div className="mt-1 font-semibold text-slate-900">{roundStatus}</div>
+                  <div className="mt-1 font-semibold text-slate-900">{formatStatus(roundStatus)}</div>
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="text-slate-500">Deadline</div>

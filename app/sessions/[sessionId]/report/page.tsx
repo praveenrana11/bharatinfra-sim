@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
+import { formatStatus } from "@/lib/formatters";
 import { getSupabaseClient } from "@/lib/supabaseClient";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { parseKpiTarget, evaluateKpiAchievement } from "@/lib/kpi";
@@ -18,6 +19,7 @@ type SessionRow = {
   status: string;
   round_count: number;
   current_round: number;
+  created_by: string;
 };
 
 type MembershipRow = { team_id: string };
@@ -458,6 +460,7 @@ export default function SessionFinancialReportPage() {
 
   const [session, setSession] = useState<SessionRow | null>(null);
   const [team, setTeam] = useState<TeamRow | null>(null);
+  const [isFacilitator, setIsFacilitator] = useState(false);
   const [rows, setRows] = useState<TeamResultRow[]>([]);
   const [sessionTeams, setSessionTeams] = useState<SessionTeamRow[]>([]);
   const [sessionScores, setSessionScores] = useState<SessionScoreRow[]>([]);
@@ -508,7 +511,7 @@ export default function SessionFinancialReportPage() {
         setSavedScenarios([]);
         setScenarioError(
           isMissingTableError(scenarioErr.message)
-            ? "Scenario table missing. Run migration 20260314_what_if_scenarios_5e5.sql in Supabase SQL Editor."
+            ? "Scenario presets are unavailable right now."
             : scenarioErr.message
         );
         return;
@@ -594,7 +597,7 @@ export default function SessionFinancialReportPage() {
       setUserId(user.id);
       const { data: sessionData, error: sessionErr } = await supabase
         .from("sessions")
-        .select("id,name,code,status,round_count,current_round")
+        .select("id,name,code,status,round_count,current_round,created_by")
         .eq("id", sessionId)
         .maybeSingle();
 
@@ -611,6 +614,7 @@ export default function SessionFinancialReportPage() {
         return;
       }
       setSession(sessionRow);
+      setIsFacilitator(sessionRow.created_by === user.id);
 
       const { data: membershipData, error: membershipErr } = await supabase
         .from("team_memberships")
@@ -1168,6 +1172,7 @@ export default function SessionFinancialReportPage() {
       leadOverBelow: Math.max(myFinal - (below?.final_points ?? 0), 0),
     };
   }, [team?.id, yearRows, sessionScores, sessionTeams]);
+  const hasCompetitiveLeaderboard = (benchmarkModel?.series.length ?? 0) > 1;
 
   const riskDebtModel = useMemo(() => {
     if (yearRows.length === 0) return null;
@@ -1287,7 +1292,9 @@ export default function SessionFinancialReportPage() {
       const prevYear = prev ? yearByRound.get(prev.round_number) ?? null : null;
 
       let reason = "Round opened; baseline rank established.";
-      if (prev) {
+      if (sessionTeams.length <= 1) {
+        reason = "Rank comparison will appear once more teams join the session.";
+      } else if (prev) {
         if (rank < prev.rank) {
           if (currentYear?.kpi_hit && !prevYear?.kpi_hit) {
             reason = "KPI hit unlocked stronger points growth than peers.";
@@ -1322,7 +1329,7 @@ export default function SessionFinancialReportPage() {
         fy: `FY ${round}`,
         rank,
         points,
-        rank_delta: prev ? prev.rank - rank : 0,
+        rank_delta: prev && sessionTeams.length > 1 ? prev.rank - rank : 0,
         points_delta: prev ? points - prev.points : points,
         change_reason: reason,
       });
@@ -1446,6 +1453,7 @@ export default function SessionFinancialReportPage() {
       }
     }
 
+    const hasCompetitiveLeaderboard = (benchmarkModel?.series.length ?? 0) > 1;
     let projectedRank = benchmarkModel?.myRank ?? null;
     let rankDelta = 0;
 
@@ -1485,7 +1493,9 @@ export default function SessionFinancialReportPage() {
       reasons.push("Risk debt remains broadly stable versus current year.");
     }
 
-    if (rankDelta > 0) {
+    if (!hasCompetitiveLeaderboard) {
+      reasons.push("Rank comparison will appear once more teams join the session.");
+    } else if (rankDelta > 0) {
       reasons.push(`Projected rank improves by ${rankDelta} place(s) if peers maintain current pace.`);
     } else if (rankDelta < 0) {
       reasons.push(`Projected rank may drop by ${Math.abs(rankDelta)} place(s) under current assumptions.`);
@@ -1612,9 +1622,9 @@ export default function SessionFinancialReportPage() {
 
     const scenarioName = `Auto ${drilldownModel.current.fy} Preset`;
     const notes =
-      `Generated from FY Change Drilldown (5E-17). ` +
-      `Levers -> schedule:${drilldownScheduleEffort}, cost:${drilldownCostControl}, quality_safety:${drilldownQualitySafety}. ` +
-      `Projected next FY points:${drilldownModel.projected.points}, risk_debt:${drilldownModel.projected.riskDebt}.`;
+      `Generated from FY change drilldown. ` +
+      `Levers: schedule ${drilldownScheduleEffort}, cost ${drilldownCostControl}, quality & safety ${drilldownQualitySafety}. ` +
+      `Projected next FY points: ${drilldownModel.projected.points}, risk debt: ${drilldownModel.projected.riskDebt}.`;
 
     return {
       scenarioName,
@@ -1771,7 +1781,7 @@ export default function SessionFinancialReportPage() {
     if (promoteErr) {
       setDrilldownActionError(
         isMissingTableError(promoteErr.message)
-          ? "Promotion table missing. Run migration 20260314_scenario_promotions_5e7.sql in Supabase SQL Editor."
+          ? "Promotion history is unavailable right now."
           : promoteErr.message
       );
       return;
@@ -1976,7 +1986,7 @@ export default function SessionFinancialReportPage() {
     if (promoteErr) {
       setScenarioError(
         isMissingTableError(promoteErr.message)
-          ? "Promotion table missing. Run migration 20260314_scenario_promotions_5e7.sql in Supabase SQL Editor."
+          ? "Promotion history is unavailable right now."
           : promoteErr.message
       );
       return;
@@ -2169,7 +2179,7 @@ export default function SessionFinancialReportPage() {
               <CardBody className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="text-slate-500">Session status</div>
-                  <div className="mt-1 font-semibold text-slate-900">{session?.status ?? "-"}</div>
+                  <div className="mt-1 font-semibold text-slate-900">{session?.status ? formatStatus(session.status) : "-"}</div>
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="text-slate-500">Years played</div>
@@ -2213,7 +2223,7 @@ export default function SessionFinancialReportPage() {
             </Card>
             <Card>
               <CardHeader
-                title="KPI Multiplier Forensics (5E-13)"
+                title="KPI Multiplier Insights"
                 subtitle="Round-wise base vs 4x KPI effect, missed upside, and multiplier discipline"
               />
               <CardBody className="space-y-4">
@@ -2357,7 +2367,7 @@ export default function SessionFinancialReportPage() {
 
             <Card>
               <CardHeader
-                title="Session Benchmark (5B)"
+                title="Session Benchmark"
                 subtitle="Cumulative points race across all teams in this simulation"
               />
               <CardBody className="space-y-4">
@@ -2485,7 +2495,7 @@ export default function SessionFinancialReportPage() {
             </Card>
 
             <Card>
-              <CardHeader title="Risk Debt Trend (5E-3)" subtitle="Carry-forward debt across delivery, quality, safety, compliance, and cash" />
+              <CardHeader title="Risk Debt Trend" subtitle="Carry-forward debt across delivery, quality, safety, compliance, and cash" />
               <CardBody className="space-y-4">
                 {!riskDebtModel ? (
                   <div className="text-sm text-slate-600">Risk debt trend will appear once round results are available.</div>
@@ -2600,7 +2610,7 @@ export default function SessionFinancialReportPage() {
             </Card>
 
             <Card>
-              <CardHeader title="Rank Movement Forensics (5E-3)" subtitle="How your rank changed each FY and why" />
+              <CardHeader title="Rank Movement" subtitle="How your rank changed each FY and why" />
               <CardBody className="space-y-4">
                 {!rankMovementModel ? (
                   <div className="text-sm text-slate-600">Rank movement forensics will appear once session score timeline is available.</div>
@@ -2674,9 +2684,11 @@ export default function SessionFinancialReportPage() {
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <div className="font-semibold text-slate-900">{round.fy} - Rank #{round.rank}</div>
                             <div className="flex items-center gap-2 text-xs">
-                              <span className={`rounded-full px-2 py-0.5 ${round.rank_delta >= 0 ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
-                                Rank delta {formatDelta(round.rank_delta)}
-                              </span>
+                              {hasCompetitiveLeaderboard ? (
+                                <span className={`rounded-full px-2 py-0.5 ${round.rank_delta >= 0 ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+                                  Rank delta {formatDelta(round.rank_delta)}
+                                </span>
+                              ) : null}
                               <span className={`rounded-full px-2 py-0.5 ${round.points_delta >= 0 ? "bg-cyan-100 text-cyan-700" : "bg-amber-100 text-amber-700"}`}>
                                 Points delta {formatDelta(round.points_delta)}
                               </span>
@@ -2692,7 +2704,7 @@ export default function SessionFinancialReportPage() {
             </Card>
 
             <Card>
-              <CardHeader title="Next FY What-if Simulator (5E-4)" subtitle="Deterministic projection before lock: simulate points, debt, and rank movement" />
+              <CardHeader title="Next FY What-if Simulator" subtitle="Deterministic projection before lock: simulate points, debt, and rank movement" />
               <CardBody className="space-y-4">
                 {!whatIfProjection ? (
                   <div className="text-sm text-slate-600">Play at least one financial year to unlock the what-if simulator.</div>
@@ -2716,9 +2728,11 @@ export default function SessionFinancialReportPage() {
                         <div className="mt-1 text-xl font-semibold text-slate-900">
                           {whatIfProjection.projectedRank ? `#${whatIfProjection.projectedRank}` : "-"}
                         </div>
-                        <div className={`text-xs ${whatIfProjection.rankDelta >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
-                          Rank delta {formatDelta(whatIfProjection.rankDelta)}
-                        </div>
+                        {hasCompetitiveLeaderboard ? (
+                          <div className={`text-xs ${whatIfProjection.rankDelta >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                            Rank delta {formatDelta(whatIfProjection.rankDelta)}
+                          </div>
+                        ) : null}
                       </div>
                       <div className="rounded-xl border border-slate-200 bg-white p-3">
                         <div className="text-slate-500">Scenario confidence</div>
@@ -2818,7 +2832,7 @@ export default function SessionFinancialReportPage() {
                     <div className="rounded-xl border border-slate-200 bg-white p-3">
                       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                         <div>
-                          <div className="font-semibold text-slate-900">Scenario Presets (5E-5)</div>
+                          <div className="font-semibold text-slate-900">Scenario Presets</div>
                           <div className="text-xs text-slate-500">Save and reload combinations for faster team discussions before lock.</div>
                         </div>
                       </div>
@@ -2898,7 +2912,7 @@ export default function SessionFinancialReportPage() {
                     </div>
                       {scenarioComparison ? (
                         <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                          <div className="font-semibold text-slate-900">Scenario Compare (5E-6)</div>
+                          <div className="font-semibold text-slate-900">Scenario Compare</div>
                           <div className="text-xs text-slate-500">Choose two saved presets and compare downside vs upside before locking next FY.</div>
 
                           <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
@@ -3013,11 +3027,11 @@ export default function SessionFinancialReportPage() {
               </CardBody>
             </Card>
             <Card>
-              <CardHeader title="Promotion Impact Backtest (5E-10)" subtitle="Did promoted scenarios actually improve next financial year performance?" />
+              <CardHeader title="Promotion Impact Backtest" subtitle="Did promoted scenarios actually improve next financial year performance?" />
               <CardBody className="space-y-4">
                 {!promotionHistoryReady ? (
                   <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                    Run migration <code>20260314_scenario_promotions_5e7.sql</code> to enable promotion impact backtest.
+                    Promotion impact history is unavailable right now.
                   </div>
                 ) : promotionHistoryError ? (
                   <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{promotionHistoryError}</div>
@@ -3215,7 +3229,7 @@ export default function SessionFinancialReportPage() {
 
             <Card>
               <CardHeader
-                title="FY Change Drilldown (5E-17)"
+                title="FY Change Drilldown"
                 subtitle="Select an FY, inspect what changed vs previous year, and simulate deterministic next FY impact"
               />
               <CardBody className="space-y-4">
@@ -3302,7 +3316,7 @@ export default function SessionFinancialReportPage() {
                     <div className="rounded-xl border border-slate-200 bg-white p-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
-                          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Recommended preset (5E-18)</div>
+                          <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Recommended Preset</div>
                           <div className="mt-1 text-sm font-semibold text-slate-900">
                             Auto {drilldownModel.current.fy} Preset
                           </div>
@@ -3525,18 +3539,27 @@ export default function SessionFinancialReportPage() {
             </Card>
 
             <Card>
-              <CardHeader title="Yearly Ledger (5E-16)" subtitle="Round-wise financial and scoring snapshot with CSV export" />
+              <CardHeader
+                title="Yearly Ledger"
+                subtitle={
+                  isFacilitator
+                    ? "Round-wise financial and scoring snapshot with CSV export"
+                    : "Round-wise financial and scoring snapshot"
+                }
+              />
               <CardBody>
-                <div className="mb-3 flex justify-end">
-                  <button
-                    type="button"
-                    onClick={handleDownloadYearlyLedger}
-                    disabled={yearRows.length === 0}
-                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Download CSV
-                  </button>
-                </div>
+                {isFacilitator ? (
+                  <div className="mb-3 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleDownloadYearlyLedger}
+                      disabled={yearRows.length === 0}
+                      className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Download CSV
+                    </button>
+                  </div>
+                ) : null}
                 <div className="overflow-x-auto">
                   <table className="min-w-full text-left text-sm">
                     <thead>

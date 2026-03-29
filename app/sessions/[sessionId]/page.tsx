@@ -930,55 +930,84 @@ async function autoCloseRoundWithAutolock(closeIso: string): Promise<AutoCloseSu
               </CardBody>
             </Card>
 
-            <Card>
-              <CardHeader title="Live Events Intel" subtitle={`Round ${nextRound} Shocks`} />
-              <CardBody className="space-y-3">
-                {roundShocks.length === 0 ? (
-                  <div className="text-xs text-slate-500 italic">No anomalies detected.</div>
-                ) : (
-                  roundShocks.slice(0, 3).map((event) => (
-                    <div key={event.id} className="rounded border border-slate-700 bg-slate-900/50 p-3">
-                      <div className="flex justify-between items-start gap-2">
-                        <div className="text-sm font-bold text-white line-clamp-1">{event.title}</div>
-                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-black ${event.severity >= 3 ? "bg-rose-500/20 text-rose-400" : event.severity === 2 ? "bg-amber-500/20 text-amber-400" : "bg-blue-500/20 text-blue-400"}`}>
-                          S{event.severity}
-                        </span>
-                      </div>
-                      <div className="mt-1 text-xs text-slate-400 line-clamp-2">{event.description}</div>
-                    </div>
-                  ))
-                )}
-              </CardBody>
-            </Card>
-
             {isHost && (
-              <Card className="border-amber-500/30">
-                <CardHeader title="Game Master Override" className="border-amber-500/20 text-amber-500" />
-                <CardBody className="space-y-3">
-                  <div className="text-xs text-slate-400">
-                    <span className="font-semibold text-slate-300">Lock Status:</span> {lockedTeams} / {teamCount} Teams Locked
+              <Card className="border-amber-300/40 bg-gradient-to-br from-amber-300/12 via-amber-100/6 to-slate-950/95">
+                <CardHeader
+                  title="Facilitator Controls"
+                  subtitle="Round operations, shock preview, and exports are visible only to the session facilitator."
+                  className="border-amber-300/20"
+                />
+                <CardBody className="space-y-4">
+                  <div className="rounded-2xl border border-amber-300/20 bg-slate-950/60 p-4">
+                    <div className="text-[10px] uppercase tracking-widest text-amber-200/80">Round Lock Status</div>
+                    <div className="mt-2 text-sm font-semibold text-white">
+                      {lockedTeams} / {teamCount} teams locked for Round {nextRound}
+                    </div>
                   </div>
-                  <Button variant="secondary" onClick={openRoundByHost} disabled={adminBusy || isComplete || roundStatus === "open"} className="w-full border-amber-700/50 text-amber-400 hover:bg-amber-900/20 hover:text-amber-300">
-                    {adminBusy ? "Override Engaged..." : `Force Open Round ${nextRound}`}
-                  </Button>
-                  <Button variant="secondary" onClick={() => void closeRoundByHost()} disabled={adminBusy || isComplete || roundStatus === "closed"} className="w-full border-rose-700/50 text-rose-400 hover:bg-rose-900/20 hover:text-rose-300">
-                    {adminBusy ? "Locking Grid..." : `Force Auto-Lock Round ${nextRound}`}
-                  </Button>
-                  
+
+                  <div className="space-y-3 rounded-2xl border border-amber-300/20 bg-slate-950/60 p-4">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-widest text-amber-200/80">Shock Preview</div>
+                      <div className="mt-1 text-xs text-slate-300">Preview the first few live events before you open or extend the round.</div>
+                    </div>
+
+                    {roundShocks.length === 0 ? (
+                      <div className="text-xs italic text-slate-400">No anomalies detected.</div>
+                    ) : (
+                      roundShocks.slice(0, 3).map((event) => (
+                        <div key={event.id} className="rounded border border-amber-300/15 bg-slate-900/70 p-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="text-sm font-bold text-white line-clamp-1">{event.title}</div>
+                            <span className={`rounded px-1.5 py-0.5 text-[9px] font-black ${event.severity >= 3 ? "bg-rose-500/20 text-rose-300" : event.severity === 2 ? "bg-amber-500/20 text-amber-200" : "bg-sky-500/20 text-sky-200"}`}>
+                              S{event.severity}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-xs text-slate-300 line-clamp-3">{event.description}</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  <div className="grid gap-3">
+                    <Button
+                      variant="secondary"
+                      onClick={openRoundByHost}
+                      disabled={adminBusy || isComplete || roundStatus === "open"}
+                      className="w-full border-amber-700/50 text-amber-300 hover:bg-amber-900/20 hover:text-amber-200"
+                    >
+                      {adminBusy ? "Working..." : `Open Round ${nextRound}`}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => void closeRoundByHost()}
+                      disabled={adminBusy || isComplete || roundStatus === "closed"}
+                      className="w-full border-rose-700/50 text-rose-300 hover:bg-rose-900/20 hover:text-rose-200"
+                    >
+                      {adminBusy ? "Working..." : `Close Round ${nextRound}`}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => void extendDeadlineByHost(10)}
+                      disabled={adminBusy || isComplete || roundStatus !== "open"}
+                      className="w-full border-yellow-600/40 text-yellow-200 hover:bg-yellow-900/20 hover:text-yellow-100"
+                    >
+                      {adminBusy ? "Working..." : "Extend Round +10 min"}
+                    </Button>
+                    <Link href={`/sessions/${sessionId}/report`} className="block w-full">
+                      <Button variant="secondary" className="w-full border-white/15 text-slate-100 hover:border-amber-300/30 hover:bg-white/10">
+                        Open Metrics & Export CSV
+                      </Button>
+                    </Link>
+                  </div>
+
                   {adminMessage && (
-                    <div className="mt-2 rounded bg-slate-900 p-2 text-[10px] text-amber-400 font-mono">
+                    <div className="rounded bg-slate-900/90 p-2 text-[10px] font-mono text-amber-300">
                       &gt; {adminMessage}
                     </div>
                   )}
                 </CardBody>
               </Card>
             )}
-            
-            <Link href={`/sessions/${sessionId}/report`} className="block w-full">
-              <Button variant="secondary" className="w-full shadow-lg border-white/10 hover:border-white/20">
-                ACCESS METRICS DASHBOARD
-              </Button>
-            </Link>
           </div>
         )}
       </div>

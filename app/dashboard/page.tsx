@@ -40,6 +40,12 @@ function makeSessionCode() {
   return `BI-${part}`;
 }
 
+function makePendingTeamName(email: string | null | undefined) {
+  const localPart = email?.split("@")[0]?.trim();
+  if (!localPart) return "Identity Setup Pending";
+  return `${localPart} Team`;
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const supabase = useMemo(() => getSupabaseClient(), []);
@@ -53,7 +59,7 @@ export default function DashboardPage() {
   const [error, setError] = useState<string>("");
 
   const [scenarioId, setScenarioId] = useState<string>("");
-  const [sessionName, setSessionName] = useState<string>("My BharatInfra Session");
+  const [sessionName, setSessionName] = useState<string>("");
   const [roundCount, setRoundCount] = useState<number>(4);
   const [joinCode, setJoinCode] = useState<string>("");
 
@@ -151,14 +157,20 @@ export default function DashboardPage() {
 
       if (!scenarioId) throw new Error("No scenario found. Seed scenarios in Supabase first.");
 
+      const trimmedSessionName = sessionName.trim();
+      if (!trimmedSessionName) {
+        throw new Error("Enter a session name before creating the session.");
+      }
+
       const code = makeSessionCode();
+      const pendingTeamName = makePendingTeamName(user.email);
 
       const { data: session, error: sessionErr } = await supabase
         .from("sessions")
         .insert({
           scenario_id: scenarioId,
           code,
-          name: sessionName,
+          name: trimmedSessionName,
           status: "pending",
           round_count: roundCount,
           current_round: 0,
@@ -173,7 +185,7 @@ export default function DashboardPage() {
         .from("teams")
         .insert({
           session_id: session.id,
-          team_name: "Team 1",
+          team_name: pendingTeamName,
         })
         .select("id")
         .single();
@@ -221,7 +233,7 @@ export default function DashboardPage() {
 
       if (sessionErr) throw sessionErr;
 
-      const teamName = email ? `Team-${email.split("@")[0]}` : "New Team";
+      const teamName = makePendingTeamName(user.email);
 
       const { data: team, error: teamErr } = await supabase
         .from("teams")
@@ -355,6 +367,18 @@ export default function DashboardPage() {
               <Card>
                 <CardHeader title="Create Mission" subtitle="Host a new simulation for your team." />
                 <CardBody className="space-y-4">
+                  <div>
+                    <Label htmlFor="sessionName" className="text-slate-400">Session Name</Label>
+                    <Input
+                      id="sessionName"
+                      placeholder="IIM Kozhikode Batch 2025 - Module 3"
+                      value={sessionName}
+                      onChange={(e) => setSessionName(e.target.value)}
+                    />
+                    <div className="mt-2 text-xs text-slate-500">
+                      Use a clear cohort or workshop name so participants can spot the right session quickly.
+                    </div>
+                  </div>
                   <div>
                     <Label htmlFor="scenario" className="text-slate-400">Scenario</Label>
                     <select

@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
+import { formatStatus } from "@/lib/formatters";
 import { getSupabaseClient } from "@/lib/supabaseClient";
 import { scoreRoundSecureClient } from "@/lib/secureRoundScoring";
 import { setTeamKpiTargetSecureClient } from "@/lib/secureTeamKpi";
@@ -19,6 +20,8 @@ import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { DecisionSlider } from "@/components/DecisionSlider";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { Tooltip } from "@/components/ui/Tooltip";
+import LockConfirmationModal, { type LockConfirmationSection } from "@/components/LockConfirmationModal";
 import RoundBriefingCard from "@/components/RoundBriefingCard";
 import {
   DecisionProfile,
@@ -62,10 +65,25 @@ const postureOptions: Array<{ value: StrategicPosture; icon: string; text: strin
   { value: "Stakeholder Trust", icon: "TR", text: "Stakeholder trust" },
 ];
 
-const expansionOptions: Array<{ value: ExpansionMode; icon: string; text: string }> = [
-  { value: "Consolidate Existing Regions", icon: "CO", text: "Consolidate existing regions" },
-  { value: "Pilot One New Region", icon: "P1", text: "Pilot one new region" },
-  { value: "Scale Two New Regions", icon: "S2", text: "Scale two new regions" },
+const expansionOptions: Array<{ value: ExpansionMode; icon: string; text: string; hint: string }> = [
+  {
+    value: "Consolidate Existing Regions",
+    icon: "CO",
+    text: "Consolidate existing regions",
+    hint: "Focus on current projects. Lower complexity, protect margins, reduce delivery risk. Best when behind on schedule.",
+  },
+  {
+    value: "Pilot One New Region",
+    icon: "P1",
+    text: "Pilot one new region",
+    hint: "Moderate expansion. Adds one new geography. Balanced risk and a practical test of a new market without overextending.",
+  },
+  {
+    value: "Scale Two New Regions",
+    icon: "S2",
+    text: "Scale two new regions",
+    hint: "Aggressive growth. High revenue upside but stretches workforce and increases delivery risk significantly.",
+  },
 ];
 
 const sectorOptions: Array<{ value: ConstructionSector; icon: string; text: string }> = [
@@ -108,10 +126,25 @@ const logisticsOptions: Array<{ value: LogisticsResilience; icon: string; text: 
   { value: "High Resilience", icon: "HR", text: "High resilience" },
 ];
 
-const transparencyOptions: Array<{ value: TransparencyLevel; icon: string; text: string }> = [
-  { value: "Standard", icon: "ST", text: "Standard" },
-  { value: "Proactive", icon: "PR", text: "Proactive" },
-  { value: "Public Dashboard", icon: "DB", text: "Public dashboard" },
+const transparencyOptions: Array<{ value: TransparencyLevel; icon: string; text: string; hint: string }> = [
+  {
+    value: "Standard",
+    icon: "ST",
+    text: "Standard",
+    hint: "Routine reporting only. Low overhead but more reactive when issues appear. Suits stable projects.",
+  },
+  {
+    value: "Proactive",
+    icon: "PR",
+    text: "Proactive",
+    hint: "Regular client updates before issues escalate. Builds trust and reduces claim disputes.",
+  },
+  {
+    value: "Public Dashboard",
+    icon: "DB",
+    text: "Public dashboard",
+    hint: "Full visibility to client and stakeholders. Maximum trust, but internal issues are exposed publicly.",
+  },
 ];
 
 const financingOptions: Array<{ value: FinancingPosture; icon: string; text: string }> = [
@@ -154,6 +187,133 @@ type EngagementMission = {
   impact: string;
   done: boolean;
 };
+
+type TooltipCopy = {
+  title: string;
+  lines: string[];
+};
+
+const decisionFieldTooltips = {
+  costFocus: {
+    title: "Cost focus",
+    lines: [
+      "How much you prioritise budget control.",
+      "Higher means tighter cost discipline.",
+      "That can compromise quality or speed.",
+    ],
+  },
+  qualityFocus: {
+    title: "Quality focus",
+    lines: [
+      "Investment in defect-free delivery.",
+      "Higher means fewer snags and better client satisfaction.",
+      "It also costs more.",
+    ],
+  },
+  stakeholderFocus: {
+    title: "Stakeholder focus",
+    lines: [
+      "Effort on client communication and community relations.",
+      "Higher improves your stakeholder score.",
+      "It also diverts bandwidth from the core team.",
+    ],
+  },
+  speedFocus: {
+    title: "Speed focus",
+    lines: [
+      "How strongly you prioritise schedule over other factors.",
+      "Higher can improve SPI and visible pace.",
+      "It raises the risk of cost overrun and quality issues.",
+    ],
+  },
+  bidAggressiveness: {
+    title: "Bid aggressiveness",
+    lines: [
+      "1 means conservative bids with healthier margins.",
+      "5 means razor-thin margins to win more volume.",
+      "At 5, cash pressure risk is much higher.",
+    ],
+  },
+  publicProjectMix: {
+    title: "Public project mix",
+    lines: [
+      "This is the share of your portfolio that sits in government contracts.",
+      "Higher usually means more stable work.",
+      "It also brings slower payment cycles and more compliance load.",
+    ],
+  },
+  riskAppetite: {
+    title: "Risk appetite",
+    lines: [
+      "Conservative choices reduce penalties and downside.",
+      "Aggressive choices create more upside.",
+      "They also leave you more exposed to shock events.",
+    ],
+  },
+  governanceIntensity: {
+    title: "Governance intensity",
+    lines: [
+      "This is your compliance and control investment level.",
+      "Higher reduces regulatory risk.",
+      "It also adds overhead cost.",
+    ],
+  },
+  pmUtilizationTarget: {
+    title: "P&M utilisation target",
+    lines: [
+      "How hard you are running your plant and machinery.",
+      "Pushing above 85% creates a breakdown and maintenance risk zone.",
+      "That can trigger cost spikes quickly.",
+    ],
+  },
+  specializedCapability: {
+    title: "Specialised work capability",
+    lines: [
+      "Your in-house specialist skill level.",
+      "Higher reduces dependency on subcontractors.",
+      "It requires more training and capability investment.",
+    ],
+  },
+  workLifeBalance: {
+    title: "Work-life balance index",
+    lines: [
+      "A welfare score for how sustainable the team setup feels.",
+      "Low levels raise burnout, attrition, and safety incident risk.",
+      "Higher levels support productivity and retention.",
+    ],
+  },
+  buffer: {
+    title: "Buffer",
+    lines: [
+      "Schedule contingency buffer for the plan.",
+      "Higher helps protect SPI when conditions worsen.",
+      "It can also signal lower confidence to the client.",
+    ],
+  },
+  communityEngagement: {
+    title: "Community engagement",
+    lines: [
+      "Investment in local stakeholder relations.",
+      "It affects stakeholder score directly.",
+      "It also changes the risk of protests or local delays.",
+    ],
+  },
+  csrSustainability: {
+    title: "CSR & sustainability",
+    lines: [
+      "Your ESG and sustainability spend level.",
+      "It influences stakeholder score.",
+      "It also matters more in client evaluation criteria over time.",
+    ],
+  },
+  facilitationRiskBudget: {
+    title: "Facilitation risk budget",
+    lines: [
+      "Reserve kept aside for unforeseen risk management.",
+      "If you set it to 0, you stay fully exposed to shock-event penalties.",
+    ],
+  },
+} satisfies Record<string, TooltipCopy>;
 
 function createInitialStepDurations(): Record<StepIndex, number> {
   return { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 };
@@ -459,6 +619,16 @@ function StepTile({
     </button>
   );
 }
+
+function FieldLabel({ label, tooltip }: { label: string; tooltip?: TooltipCopy }) {
+  return (
+    <span className="inline-flex items-center gap-2">
+      <span>{label}</span>
+      {tooltip ? <Tooltip title={tooltip.title} lines={tooltip.lines} /> : null}
+    </span>
+  );
+}
+
 function BudgetBar({ label, value, max }: { label: string; value: number; max: number }) {
   const width = Math.round((value / Math.max(max, 1)) * 100);
 
@@ -630,6 +800,24 @@ function ProjectionBar({
     </div>
   );
 }
+
+function describeScaleLevel(value: number, max = 100) {
+  const normalized = max <= 0 ? 0 : (value / max) * 100;
+  if (normalized >= 80) return "High";
+  if (normalized >= 60) return "Strong";
+  if (normalized >= 40) return "Balanced";
+  if (normalized >= 20) return "Low";
+  return "Very low";
+}
+
+function describeBidAggressiveness(value: number) {
+  if (value >= 5) return "Very aggressive";
+  if (value >= 4) return "Aggressive";
+  if (value >= 3) return "Balanced";
+  if (value >= 2) return "Measured";
+  return "Conservative";
+}
+
 export default function RoundDecisionPage() {
   const params = useParams();
   const router = useRouter();
@@ -653,6 +841,7 @@ export default function RoundDecisionPage() {
   const [promotionWarning, setPromotionWarning] = useState("");
   const [saving, setSaving] = useState(false);
   const [locking, setLocking] = useState(false);
+  const [showLockConfirmation, setShowLockConfirmation] = useState(false);
 
   const [clockNow, setClockNow] = useState(Date.now());
   const [roundDeadlineIso, setRoundDeadlineIso] = useState<string | null>(null);
@@ -1416,19 +1605,6 @@ export default function RoundDecisionPage() {
       const submittedAt = new Date().toISOString();
       const latePenaltyPreview = computeLatePenalty(roundDeadlineIso, submittedAt, roundClockSource);
 
-      if (
-        (latePenaltyPreview.pointsPenalty > 0 || readinessScore < 60) &&
-        !window.confirm(
-          "You are about to lock with " +
-            (latePenaltyPreview.pointsPenalty > 0 ? "timeliness penalty and " : "") +
-            (readinessScore < 60 ? "low readiness score." : "") +
-            " Continue?"
-        )
-      ) {
-        setLocking(false);
-        return;
-      }
-
       const { error: lockErr } = await supabase.from("decisions").upsert(
         {
           session_id: sessionId,
@@ -1536,13 +1712,20 @@ export default function RoundDecisionPage() {
       });
 
       setLocked(true);
+      setShowLockConfirmation(false);
       router.push(`/sessions/${sessionId}/round/${roundNumber}/results`);
     } catch (unknownError: unknown) {
+      setShowLockConfirmation(false);
       setError(toErrorMessage(unknownError, "Failed to lock and generate results"));
     } finally {
       setLocking(false);
     }
   }
+
+  const openLockConfirmation = () => {
+    setError("");
+    setShowLockConfirmation(true);
+  };
 
     const biggestBudget = Math.max(
     budget.people_l_and_d,
@@ -1565,6 +1748,128 @@ export default function RoundDecisionPage() {
   const fyLabel = `FY ${roundNumber}`;
   const selectedSectorMeta = sectorVisuals[form.primary_sector];
   const subcontractShare = Math.max(0, 100 - form.self_perform_percent);
+  const latePenaltyPreview = useMemo(
+    () => computeLatePenalty(roundDeadlineIso, new Date(clockNow).toISOString(), roundClockSource),
+    [clockNow, roundClockSource, roundDeadlineIso]
+  );
+
+  const lockSummarySections = useMemo<LockConfirmationSection[]>(
+    () => [
+      {
+        title: "Step 1 - Context & Strategy",
+        items: [
+          {
+            label: "Focus Allocation",
+            value: `Cost ${form.focus_cost}%, Quality ${form.focus_quality}%, Stakeholder ${form.focus_stakeholder}%, Speed ${form.focus_speed}%`,
+          },
+          {
+            label: "External Context",
+            value: `${form.external_context} with a ${form.public_message_tone.toLowerCase()} message tone`,
+          },
+          {
+            label: "Strategic Posture",
+            value: `${form.strategic_posture} with ${form.market_expansion.toLowerCase()}`,
+          },
+        ],
+      },
+      {
+        title: "Step 2 - Market & Governance",
+        items: [
+          {
+            label: "Sector & Strategy",
+            value:
+              form.secondary_sector === "None"
+                ? `${form.primary_sector} as the sole delivery focus`
+                : `${form.primary_sector} primary with ${form.secondary_sector} as the secondary sector`,
+          },
+          {
+            label: "Risk & Governance",
+            value: `${form.risk_appetite} risk appetite with ${form.governance_intensity} governance and ${form.vendor_strategy.toLowerCase()} vendor strategy`,
+          },
+          {
+            label: "Key Sliders",
+            value: `Public mix: ${describeScaleLevel(form.project_mix_public_pct)} (${form.project_mix_public_pct}/100), Bid aggressiveness: ${describeBidAggressiveness(form.bid_aggressiveness)} (${form.bid_aggressiveness}/5), Buffer: ${describeScaleLevel(form.buffer_percent, 15)} (${form.buffer_percent}/15)`,
+          },
+        ],
+      },
+      {
+        title: "Step 3 - People & Engineering",
+        items: [
+          {
+            label: "Subcontractor Mix Choice",
+            value: `${form.self_perform_percent}% self-perform and ${subcontractShare}% subcontracted through ${form.subcontractor_profile}`,
+          },
+          {
+            label: "Workforce Direction",
+            value: `${form.workforce_plan} with ${form.workforce_load_state.toLowerCase()} crews and ${form.overtime_policy.toLowerCase()} overtime`,
+          },
+          {
+            label: "Key Sliders",
+            value: `Training intensity: ${describeScaleLevel(form.training_intensity)} (${form.training_intensity}/100), P&M utilization: ${describeScaleLevel(form.pm_utilization_target, 95)} (${form.pm_utilization_target}/95), Specialized capability: ${describeScaleLevel(form.specialized_work_index)} (${form.specialized_work_index}/100)`,
+          },
+        ],
+      },
+      {
+        title: "Step 4 - Ops & Stakeholder",
+        items: [
+          {
+            label: "Operations Setup",
+            value: `${form.logistics_resilience} logistics resilience, ${form.inventory_cover_weeks} weeks of inventory cover, ${form.qa_audit_frequency.toLowerCase()} QA audits`,
+          },
+          {
+            label: "Stakeholder Posture",
+            value: `${form.compliance_posture}, ${form.transparency_level.toLowerCase()} transparency, and ${form.community_engagement >= 70 ? "proactive" : form.community_engagement >= 40 ? "balanced" : "light"} community engagement`,
+          },
+          {
+            label: "Key Sliders",
+            value: `Community engagement: ${describeScaleLevel(form.community_engagement)} (${form.community_engagement}/100), Digital visibility: ${describeScaleLevel(form.digital_visibility_spend)} (${form.digital_visibility_spend}/100), CSR & sustainability: ${describeScaleLevel(form.csr_sustainability_index)} (${form.csr_sustainability_index}/100)`,
+          },
+        ],
+      },
+      {
+        title: "Step 5 - Finance & Lock",
+        items: [
+          {
+            label: "Financing Strategy",
+            value: `${form.financing_posture} with a ${form.cash_buffer_months}-month cash buffer and ${form.contingency_fund_percent}% contingency fund`,
+          },
+          {
+            label: "Forecast Call",
+            value: `Predicted SPI ${forecast.predicted_schedule_index.toFixed(2)}, predicted CPI ${forecast.predicted_cost_index.toFixed(2)}, confidence ${forecast.confidence}%`,
+          },
+          {
+            label: "Budget Pressure Snapshot",
+            value: `Estimated total budget pressure Rs ${Math.round(budget.total_budget_pressure / 1000)}k with Rs ${Math.round(budget.operations_resilience / 1000)}k toward operations resilience`,
+          },
+        ],
+      },
+    ],
+    [
+      budget.operations_resilience,
+      budget.total_budget_pressure,
+      forecast.confidence,
+      forecast.predicted_cost_index,
+      forecast.predicted_schedule_index,
+      form,
+      subcontractShare,
+    ]
+  );
+
+  const lockWarningItems = useMemo(() => {
+    const items: string[] = [];
+
+    if (latePenaltyPreview.pointsPenalty > 0) {
+      items.push(
+        `Locking now is ${latePenaltyPreview.minutesLate} minute${latePenaltyPreview.minutesLate === 1 ? "" : "s"} late and may apply a ${latePenaltyPreview.pointsPenalty}-point timeliness penalty.`
+      );
+    }
+
+    if (readinessScore < 60) {
+      items.push(`Readiness is currently ${readinessScore}%. Review weak checks before final lock if you want a safer round outcome.`);
+    }
+
+    return items;
+  }, [latePenaltyPreview.minutesLate, latePenaltyPreview.pointsPenalty, readinessScore]);
 
   const makeVsBuySnapshot = useMemo(() => {
     const inHouseCostIndex = clamp(
@@ -1635,6 +1940,18 @@ export default function RoundDecisionPage() {
   return (
     <RequireAuth>
       <div className="flex flex-col min-h-[100dvh] pb-32 bg-[#020617] text-slate-300">
+        <LockConfirmationModal
+          open={showLockConfirmation}
+          sections={lockSummarySections}
+          warningItems={lockWarningItems}
+          onClose={() => setShowLockConfirmation(false)}
+          onReview={() => {
+            setShowLockConfirmation(false);
+            setActiveStep(0);
+          }}
+          onConfirm={lockAndGenerateResults}
+          isSubmitting={locking}
+        />
         {/* HEADER ZONE */}
         <header className="sticky top-[60px] z-40 bg-slate-950/80 backdrop-blur-md border-b border-white/5 px-4 py-3 shadow-lg">
           <div className="max-w-[1180px] mx-auto flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -1657,9 +1974,16 @@ export default function RoundDecisionPage() {
               </div>
             </div>
             <div className="flex flex-col items-end">
-              <span className="text-slate-500 uppercase tracking-widest text-[9px]">Clock Source: {roundClockSource}</span>
+              <span className="text-slate-500 uppercase tracking-widest text-[9px]">Time Remaining</span>
               <span className={`font-bold text-lg font-mono leading-none ${lockWindowExpired ? "text-rose-400" : "text-emerald-400"}`}>
                 {msLeft === null ? "--:--" : formatClock(msLeft)}
+              </span>
+              <span
+                className={`mt-1 max-w-[260px] text-right text-[10px] font-semibold uppercase tracking-wide ${
+                  lockWindowExpired ? "text-rose-300" : "text-slate-400"
+                }`}
+              >
+                {roundStatus === "open" ? submissionPressure.message : `${formatStatus(roundStatus)}. Awaiting next step.`}
               </span>
             </div>
           </div>
@@ -1763,10 +2087,10 @@ export default function RoundDecisionPage() {
                             <div className={`text-[10px] font-mono font-bold ${focusSum===100?"text-emerald-400":"text-rose-400"}`}>TOTAL: {focusSum}/100</div>
                           </div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionSlider label="Cost Focus" value={form.focus_cost} min={0} max={100} onChange={v=>update("focus_cost",v)} disabled={isLocked} />
-                            <DecisionSlider label="Quality Focus" value={form.focus_quality} min={0} max={100} onChange={v=>update("focus_quality",v)} disabled={isLocked} />
-                            <DecisionSlider label="Stakeholder Focus" value={form.focus_stakeholder} min={0} max={100} onChange={v=>update("focus_stakeholder",v)} disabled={isLocked} />
-                            <DecisionSlider label="Speed Focus" value={form.focus_speed} min={0} max={100} onChange={v=>update("focus_speed",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="Cost Focus" tooltip={decisionFieldTooltips.costFocus} />} value={form.focus_cost} min={0} max={100} onChange={v=>update("focus_cost",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="Quality Focus" tooltip={decisionFieldTooltips.qualityFocus} />} value={form.focus_quality} min={0} max={100} onChange={v=>update("focus_quality",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="Stakeholder Focus" tooltip={decisionFieldTooltips.stakeholderFocus} />} value={form.focus_stakeholder} min={0} max={100} onChange={v=>update("focus_stakeholder",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="Speed Focus" tooltip={decisionFieldTooltips.speedFocus} />} value={form.focus_speed} min={0} max={100} onChange={v=>update("focus_speed",v)} disabled={isLocked} />
                           </div>
                         </div>
                         
@@ -1793,22 +2117,22 @@ export default function RoundDecisionPage() {
 
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Market Expansion</div>
-                          <SegmentedControl options={expansionOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.market_expansion} onSelect={(v)=>update("market_expansion",v)} disabled={isLocked} />
+                          <SegmentedControl options={expansionOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.market_expansion} onSelect={(v)=>update("market_expansion",v)} disabled={isLocked} />
                         </div>
 
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Portfolio Posture</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionSlider label="Bid Aggressiveness" value={form.bid_aggressiveness} min={1} max={5} onChange={v=>update("bid_aggressiveness",v)} disabled={isLocked} />
-                            <DecisionSlider label="Public Project Mix" value={form.project_mix_public_pct} min={0} max={100} suffix="%" onChange={v=>update("project_mix_public_pct",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="Bid Aggressiveness" tooltip={decisionFieldTooltips.bidAggressiveness} />} value={form.bid_aggressiveness} min={1} max={5} onChange={v=>update("bid_aggressiveness",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="Public Project Mix" tooltip={decisionFieldTooltips.publicProjectMix} />} value={form.project_mix_public_pct} min={0} max={100} suffix="%" onChange={v=>update("project_mix_public_pct",v)} disabled={isLocked} />
                           </div>
                         </div>
 
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Governance & Risk</div>
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Risk Appetite</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.risk_appetite} disabled={isLocked} onChange={e=>update("risk_appetite",e.target.value as RiskAppetite)}>{riskOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-                            <div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Gov Intensity</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.governance_intensity} disabled={isLocked} onChange={e=>update("governance_intensity",e.target.value as Governance)}>{governanceOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                            <div className="flex flex-col"><span className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500"><FieldLabel label="Risk Appetite" tooltip={decisionFieldTooltips.riskAppetite} /></span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.risk_appetite} disabled={isLocked} onChange={e=>update("risk_appetite",e.target.value as RiskAppetite)}>{riskOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                            <div className="flex flex-col"><span className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500"><FieldLabel label="Governance Intensity" tooltip={decisionFieldTooltips.governanceIntensity} /></span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.governance_intensity} disabled={isLocked} onChange={e=>update("governance_intensity",e.target.value as Governance)}>{governanceOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
                             <div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Message Tone</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.public_message_tone} disabled={isLocked} onChange={e=>update("public_message_tone",e.target.value as MessageTone)}>{messageToneOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
                           </div>
                         </div>
@@ -1822,9 +2146,9 @@ export default function RoundDecisionPage() {
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Delivery Mix & Assets</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <DecisionSlider label="Self-Perform Share" value={form.self_perform_percent} min={0} max={100} suffix="%" onChange={v=>update("self_perform_percent",v)} disabled={isLocked} />
-                            <DecisionSlider label="P&M Utilization Target" value={form.pm_utilization_target} min={40} max={95} suffix="%" onChange={v=>update("pm_utilization_target",v)} disabled={isLocked} />
-                            <DecisionSlider label="Specialized Capability" value={form.specialized_work_index} min={0} max={100} onChange={v=>update("specialized_work_index",v)} disabled={isLocked} />
-                            <DecisionSlider label="Work-Life Balance" value={form.work_life_balance_index} min={0} max={100} onChange={v=>update("work_life_balance_index",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="P&M Utilization Target" tooltip={decisionFieldTooltips.pmUtilizationTarget} />} value={form.pm_utilization_target} min={40} max={95} suffix="%" onChange={v=>update("pm_utilization_target",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="Specialized Capability" tooltip={decisionFieldTooltips.specializedCapability} />} value={form.specialized_work_index} min={0} max={100} onChange={v=>update("specialized_work_index",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="Work-Life Balance" tooltip={decisionFieldTooltips.workLifeBalance} />} value={form.work_life_balance_index} min={0} max={100} onChange={v=>update("work_life_balance_index",v)} disabled={isLocked} />
                           </div>
                         </div>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
@@ -1860,17 +2184,17 @@ export default function RoundDecisionPage() {
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Logistics & Buffer</div>
                           <SegmentedControl options={logisticsOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.logistics_resilience} onSelect={(v)=>update("logistics_resilience",v)} disabled={isLocked} />
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                            <DecisionSlider label="Buffer" value={form.buffer_percent} min={0} max={15} suffix="%" onChange={v=>update("buffer_percent",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="Buffer" tooltip={decisionFieldTooltips.buffer} />} value={form.buffer_percent} min={0} max={15} suffix="%" onChange={v=>update("buffer_percent",v)} disabled={isLocked} />
                             <DecisionSlider label="Inventory Cover" value={form.inventory_cover_weeks} min={1} max={12} suffix="w" onChange={v=>update("inventory_cover_weeks",v)} disabled={isLocked} />
                           </div>
                         </div>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Stakeholder Engagement</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionSlider label="Community Engagement" value={form.community_engagement} min={0} max={100} onChange={v=>update("community_engagement",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="Community Engagement" tooltip={decisionFieldTooltips.communityEngagement} />} value={form.community_engagement} min={0} max={100} onChange={v=>update("community_engagement",v)} disabled={isLocked} />
                             <DecisionSlider label="Digital Visibility Spend" value={form.digital_visibility_spend} min={0} max={100} onChange={v=>update("digital_visibility_spend",v)} disabled={isLocked} />
-                            <DecisionSlider label="CSR & Sustainability" value={form.csr_sustainability_index} min={0} max={100} onChange={v=>update("csr_sustainability_index",v)} disabled={isLocked} />
-                            <DecisionSlider label="Facilitation Risk Budget" value={form.facilitation_budget_index} min={0} max={100} onChange={v=>update("facilitation_budget_index",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="CSR & Sustainability" tooltip={decisionFieldTooltips.csrSustainability} />} value={form.csr_sustainability_index} min={0} max={100} onChange={v=>update("csr_sustainability_index",v)} disabled={isLocked} />
+                            <DecisionSlider label={<FieldLabel label="Facilitation Risk Budget" tooltip={decisionFieldTooltips.facilitationRiskBudget} />} value={form.facilitation_budget_index} min={0} max={100} onChange={v=>update("facilitation_budget_index",v)} disabled={isLocked} />
                           </div>
                         </div>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
@@ -1878,7 +2202,7 @@ export default function RoundDecisionPage() {
                           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                              <div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Compliance Posture</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.compliance_posture} disabled={isLocked} onChange={e=>update("compliance_posture",e.target.value as CompliancePosture)}>{complianceOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
                              <div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Vendor Strategy</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.vendor_strategy} disabled={isLocked} onChange={e=>update("vendor_strategy",e.target.value as VendorStrategy)}>{vendorOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-                             <div className="flex flex-col lg:col-span-1 md:col-span-2"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Transparency Mode</span><SegmentedControl options={transparencyOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.transparency_level} onSelect={(v)=>update("transparency_level",v)} disabled={isLocked} /></div>
+                             <div className="flex flex-col lg:col-span-1 md:col-span-2"><span className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">Transparency Mode</span><SegmentedControl options={transparencyOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.transparency_level} onSelect={(v)=>update("transparency_level",v)} disabled={isLocked} /></div>
                           </div>
                         </div>
                      </div>
@@ -2002,8 +2326,8 @@ export default function RoundDecisionPage() {
                      <Button variant="secondary" onClick={saveDraft} disabled={saving || isLocked} className="w-full md:w-auto border-slate-700 bg-slate-900 text-slate-300 py-3 text-[11px] tracking-widest">
                        {saving ? "SAVING..." : "SAVE DRAFT"}
                      </Button>
-                     <Button onClick={lockAndGenerateResults} disabled={locking || saving || isLocked || !stepValidations[4]} className="w-full md:w-auto shadow-blue-500/40 py-3 text-[11px] tracking-widest">
-                       {locking ? "INITIALIZING..." : lockBlockedByDeadline ? "WINDOW CLOSED" : "LOCK & RUN SIMULATION"}
+                     <Button onClick={openLockConfirmation} disabled={locking || saving || isLocked || !stepValidations[4]} className="w-full md:w-auto shadow-blue-500/40 py-3 text-[11px] tracking-widest">
+                       {locking ? "INITIALIZING..." : lockBlockedByDeadline ? "WINDOW CLOSED" : "LOCK AND GENERATE RESULTS"}
                      </Button>
                    </>
                  )}

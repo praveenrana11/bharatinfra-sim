@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
+import { formatStatus } from "@/lib/formatters";
 import { getSupabaseClient } from "@/lib/supabaseClient";
 import { Page, PageSubTitle, PageTitle } from "@/components/ui/Page";
 import { Card, CardBody } from "@/components/ui/Card";
@@ -370,7 +371,12 @@ export default function SessionIdentityPage() {
       }
 
       const roundRow = (roundData as RoundStatusRow | null) ?? null;
-      const profile = normalizeProfile(team.identity_profile);
+      const normalizedProfile = normalizeProfile(team.identity_profile);
+      const companyProfileName = normalizedProfile.company_name?.trim() || team.team_name?.trim() || "";
+      const profile =
+        companyProfileName && normalizedProfile.company_name !== companyProfileName
+          ? { ...normalizedProfile, company_name: companyProfileName }
+          : normalizedProfile;
       const meLabel =
         (typeof user.user_metadata?.full_name === "string" && user.user_metadata.full_name) ||
         (typeof user.user_metadata?.name === "string" && user.user_metadata.name) ||
@@ -394,7 +400,7 @@ export default function SessionIdentityPage() {
       setCurrentRound(session.current_round ?? 0);
       setRoundStatus(roundRow?.status ?? null);
       setTeamId(team.id);
-      setTeamName(team.team_name ?? "Project Team");
+      setTeamName(team.team_name?.trim() || profile.company_name?.trim() || "Project Team");
       setIdentityProfile(profile);
       setMemberOptions(options.length > 0 ? options : [{ key: "Team Lead", label: "Team Lead" }]);
       setScenarios((scenarioRows ?? []) as ScenarioRow[]);
@@ -438,9 +444,16 @@ export default function SessionIdentityPage() {
     setSaveNotice("");
 
     const nextProfile: IdentityProfile = { ...identityProfile, ...profilePatch };
-    const updatePayload: { identity_profile: IdentityProfile; scenario_id?: string; identity_completed?: boolean } = {
+    const nextTeamName = nextProfile.company_name?.trim() ?? "";
+    const updatePayload: {
+      identity_profile: IdentityProfile;
+      team_name?: string;
+      scenario_id?: string;
+      identity_completed?: boolean;
+    } = {
       identity_profile: nextProfile,
     };
+    if (nextTeamName) updatePayload.team_name = nextTeamName;
     if (extraFields?.scenario_id !== undefined) updatePayload.scenario_id = extraFields.scenario_id;
     if (extraFields?.identity_completed !== undefined) updatePayload.identity_completed = extraFields.identity_completed;
 
@@ -452,6 +465,7 @@ export default function SessionIdentityPage() {
     }
 
     setIdentityProfile(nextProfile);
+    if (nextTeamName) setTeamName(nextTeamName);
     if (successMessage) setSaveNotice(successMessage);
     setSaving(false);
     return true;
@@ -518,7 +532,7 @@ export default function SessionIdentityPage() {
 
     const { error: resetError } = await supabase
       .from("teams")
-      .update({ identity_completed: false, identity_profile: {} })
+      .update({ identity_completed: false, identity_profile: {}, team_name: "" })
       .eq("id", teamId);
 
     if (resetError) {
@@ -577,7 +591,7 @@ export default function SessionIdentityPage() {
                   Session {sessionCode || "--"}
                 </div>
                 <div className="rounded-full border border-amber-400/20 bg-amber-500/10 px-4 py-2 text-xs font-bold uppercase tracking-[0.22em] text-amber-100">
-                  Round {Math.max(currentRound, 1)} {roundStatus ? `| ${roundStatus}` : ""}
+                  Round {Math.max(currentRound, 1)} {roundStatus ? `| ${formatStatus(roundStatus)}` : ""}
                 </div>
                 {!showSuccessScreen ? (
                   <Link

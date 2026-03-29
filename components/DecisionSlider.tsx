@@ -14,7 +14,7 @@ export function DecisionSlider({
   hint,
   onChange,
 }: {
-  label: string;
+  label: React.ReactNode;
   value: number;
   min: number;
   max: number;
