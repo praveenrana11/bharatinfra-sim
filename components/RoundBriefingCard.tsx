@@ -3,6 +3,7 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 
 import { parseConstructionEvents } from "@/lib/newsPayload";
+import { getScenarioHeroImageUrl } from "@/lib/simVisuals";
 import { getSupabaseClient } from "@/lib/supabaseClient";
 
 type RoundBriefingCardProps = {
@@ -417,6 +418,7 @@ export default function RoundBriefingCard({
   const quarterLabel = quarterForRound(roundNumber);
   const fyLabel = fyForRound(roundNumber);
   const clientBadge = clientInitials(state.client);
+  const heroImageUrl = getScenarioHeroImageUrl(state.projectName);
 
   const budgetTile = isBaseline
     ? {
@@ -468,6 +470,23 @@ export default function RoundBriefingCard({
 
   return (
     <section className="glass-panel overflow-hidden rounded-[28px] border border-white/10 shadow-[0_24px_70px_rgba(15,23,42,0.45)]">
+      <div className="relative h-40 overflow-hidden">
+        <img
+          src={heroImageUrl}
+          alt={`${state.projectName} project hero`}
+          className="h-full w-full object-cover"
+        />
+        <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-slate-950/50 to-slate-950/15" />
+        <div className="absolute inset-x-0 bottom-0 px-5 py-5 sm:px-6">
+          <div className="text-[11px] font-bold uppercase tracking-[0.28em] text-white/70">
+            Project Brief
+          </div>
+          <div className="mt-2 text-2xl font-black tracking-tight text-white sm:text-3xl">
+            {state.projectName}
+          </div>
+          <div className="mt-2 text-sm font-semibold text-white/85">{state.client}</div>
+        </div>
+      </div>
       <div className="border-b border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(59,130,246,0.24),transparent_38%),radial-gradient(circle_at_top_right,rgba(245,158,11,0.16),transparent_28%),linear-gradient(135deg,#0f172a_0%,#111827_45%,#1e293b_100%)] px-5 py-5 sm:px-6">
         <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-4">

@@ -47,15 +47,20 @@ import {
 } from "@/lib/decisionProfile";
 import { ConstructionEvent, getRoundConstructionEvents } from "@/lib/constructionNews";
 import { KPI_TARGET_OPTIONS, KpiTarget, parseKpiTarget } from "@/lib/kpi";
-import { getNewsImageUrl } from "@/lib/newsVisuals";
 import { parseConstructionEvents } from "@/lib/newsPayload";
+import {
+  formatScenarioComplexity,
+  getDecisionEventImageUrl,
+  getExternalContextIcon,
+  getScenarioTypeLabel,
+} from "@/lib/simVisuals";
 import { getRoundEvents, GameEvent } from "@/lib/eventDeck";
 
 const externalContextOptions: Array<{ value: ExternalContext; icon: string; text: string }> = [
-  { value: "Stable Environment", icon: "ST", text: "Stable environment" },
-  { value: "Material Price Spike", icon: "MP", text: "Material price spike" },
-  { value: "Labor Tightness", icon: "LB", text: "Labor tightness" },
-  { value: "Permitting Delay", icon: "PD", text: "Permitting delay" },
+  { value: "Stable Environment", icon: getExternalContextIcon("Stable Environment"), text: "Stable environment" },
+  { value: "Material Price Spike", icon: getExternalContextIcon("Material Price Spike"), text: "Material price spike" },
+  { value: "Labor Tightness", icon: getExternalContextIcon("Labor Tightness"), text: "Labor tightness" },
+  { value: "Permitting Delay", icon: getExternalContextIcon("Permitting Delay"), text: "Permitting delay" },
 ];
 
 const postureOptions: Array<{ value: StrategicPosture; icon: string; text: string }> = [
@@ -183,6 +188,12 @@ type LatePenaltyResult = {
 type TooltipCopy = {
   title: string;
   lines: string[];
+};
+
+type ChecklistItem = {
+  label: string;
+  pass: boolean;
+  remainingLabel?: string;
 };
 
 const decisionFieldTooltips = {
@@ -321,14 +332,37 @@ type RouteParams = {
 
 type SessionRow = { round_count: number; current_round: number; created_by: string };
 type MembershipRow = { team_id: string };
-type TeamRow = { id: string; team_name: string; session_id: string; kpi_target: string | null };
+type TeamIdentityProfile = {
+  positioning_strategy?: string | null;
+};
+type TeamRow = {
+  id: string;
+  team_name: string;
+  session_id: string;
+  kpi_target: string | null;
+  scenario_id: string | null;
+  identity_profile: TeamIdentityProfile | null;
+};
+type ScenarioRow = {
+  name: string | null;
+  client: string | null;
+  base_budget_cr: number | string | null;
+  duration_rounds: number | null;
+  complexity: "moderate" | "high" | "extreme" | null;
+};
 
 type ExistingDecisionRow = DecisionDraft & {
   raw: Record<string, unknown> | null;
   locked: boolean;
 };
 
-type SessionRoundRow = { deadline_at: string; status: string | null; news_payload: unknown };
+type SessionRoundRow = {
+  session_id?: string;
+  round_number?: number | null;
+  deadline_at: string | null;
+  status: string | null;
+  news_payload: unknown;
+};
 
 type ScenarioPromotionRow = {
   id: string;
@@ -343,10 +377,30 @@ type ForecastState = {
   confidence: number;
 };
 
+type StepProjectContext = {
+  projectName: string;
+  client: string;
+  scenarioType: string;
+  positioningStrategy: string;
+  complexity: string;
+  baseBudgetCr: number | null;
+  totalRounds: number;
+};
+
 const DEFAULT_FORECAST: ForecastState = {
   predicted_schedule_index: 1,
   predicted_cost_index: 1,
   confidence: 50,
+};
+
+const DEFAULT_STEP_PROJECT_CONTEXT: StepProjectContext = {
+  projectName: "Project Scenario",
+  client: "Client",
+  scenarioType: "Highway Package",
+  positioningStrategy: "Not selected",
+  complexity: "moderate",
+  baseBudgetCr: null,
+  totalRounds: 1,
 };
 
 const defaultForm: ExtendedDecisionForm = {
@@ -380,6 +434,15 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 
 function toText(value: unknown, fallback: string) {
   return typeof value === "string" ? value : fallback;
+}
+
+function toNumberOrNull(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
 function toEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
@@ -423,6 +486,19 @@ function buildCoreDecision(form: ExtendedDecisionForm): DecisionDraft {
     buffer_percent: form.buffer_percent,
     vendor_strategy: form.vendor_strategy,
   };
+}
+
+function formatBudgetCr(value: number | null) {
+  if (value === null) return "Pending";
+  return `${Math.round(value)}`;
+}
+
+function StepContextBanner({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-slate-900/55 px-4 py-3 text-xs font-medium text-slate-300">
+      {children}
+    </div>
+  );
 }
 
 function buildDecisionPersistencePayload(params: {
@@ -623,6 +699,86 @@ function SidebarAccordion({
         </svg>
       </button>
       {open ? <div className="border-t border-white/5 px-4 py-4">{children}</div> : null}
+    </div>
+  );
+}
+
+function ChecklistPopover({
+  title,
+  buttonLabel,
+  items,
+}: {
+  title: string;
+  buttonLabel: string;
+  items: ChecklistItem[];
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const incompleteCount = items.filter((item) => !item.pass).length;
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!wrapperRef.current?.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [isOpen]);
+
+  return (
+    <div ref={wrapperRef} className="relative inline-flex">
+      <button
+        type="button"
+        aria-expanded={isOpen}
+        className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-slate-950/80 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-sky-200 transition hover:border-sky-400/40 hover:text-white"
+        onClick={() => setIsOpen((current) => !current)}
+      >
+        <span>{buttonLabel}</span>
+        <span className={`rounded-full px-1.5 py-0.5 text-[9px] ${incompleteCount > 0 ? "bg-amber-500/20 text-amber-300" : "bg-emerald-500/20 text-emerald-300"}`}>
+          {incompleteCount}
+        </span>
+      </button>
+
+      {isOpen ? (
+        <div className="absolute right-0 top-full z-50 mt-2 w-80 rounded-2xl border border-white/10 bg-slate-950/95 p-4 shadow-2xl shadow-slate-950/40">
+          <div className="text-xs font-black uppercase tracking-[0.2em] text-slate-200">{title}</div>
+          <div className="mt-3 space-y-2">
+            {items.map((item) => (
+              <div
+                key={item.label}
+                className={`flex items-start gap-3 rounded-xl border px-3 py-2 text-xs ${
+                  item.pass
+                    ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-100"
+                    : "border-rose-500/20 bg-rose-500/10 text-rose-100"
+                }`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full ${
+                    item.pass ? "bg-emerald-400" : "bg-rose-400"
+                  }`}
+                />
+                <span>{item.pass ? item.label : `Complete: ${item.remainingLabel ?? item.label}`}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -831,6 +987,9 @@ export default function RoundDecisionPage() {
   const [teamId, setTeamId] = useState("");
   const [teamName, setTeamName] = useState("");
   const [sessionRoundCount, setSessionRoundCount] = useState(0);
+  const [stepProjectContext, setStepProjectContext] = useState<StepProjectContext>(
+    DEFAULT_STEP_PROJECT_CONTEXT
+  );
 
   const [loading, setLoading] = useState(true);
   const [locked, setLocked] = useState(false);
@@ -842,6 +1001,7 @@ export default function RoundDecisionPage() {
   const [showLockConfirmation, setShowLockConfirmation] = useState(false);
   const [showBudgetPressure, setShowBudgetPressure] = useState(false);
   const [showProjectedOutcome, setShowProjectedOutcome] = useState(false);
+  const [navigationNotice, setNavigationNotice] = useState<{ id: number; message: string } | null>(null);
 
   const [clockNow, setClockNow] = useState(Date.now());
   const [roundDeadlineIso, setRoundDeadlineIso] = useState<string | null>(null);
@@ -872,80 +1032,187 @@ export default function RoundDecisionPage() {
 
   const focusSum = form.focus_cost + form.focus_quality + form.focus_stakeholder + form.focus_speed;
   const kpiReady = roundNumber !== 1 || Boolean(teamKpiTarget || draftKpiTarget);
+  const eventDeckReady = deckEvents.every((event) => Boolean(eventsChosen[event.id]));
   const profile = useMemo(() => extractProfile(form), [form]);
   const budget: BudgetBreakdown = useMemo(() => estimateBudgetBreakdown(profile), [profile]);
+  const totalRounds = Math.max(stepProjectContext.totalRounds, sessionRoundCount, roundNumber, 1);
+  const roundsRemaining = Math.max(totalRounds - roundNumber, 0);
 
   useEffect(() => {
     setResolvedRoundEvents(roundEvents);
   }, [roundEvents]);
-
-
-    const stepValidations: Record<StepIndex, boolean> = {
-    0: focusSum === 100 && kpiReady && Boolean(form.external_context && form.strategic_posture && form.primary_sector),
-    1:
-      form.bid_aggressiveness >= 1 &&
-      form.bid_aggressiveness <= 5 &&
-      (form.secondary_sector === "None" || form.secondary_sector !== form.primary_sector),
-    2:
-      form.training_intensity >= 20 &&
-      form.innovation_budget_index >= 25 &&
-      form.self_perform_percent >= 30 &&
-      form.self_perform_percent <= 90,
-    3:
-      form.inventory_cover_weeks >= 2 &&
-      form.community_engagement >= 30 &&
-      form.work_life_balance_index >= 25,
-    4:
-      form.cash_buffer_months >= 2 &&
-      form.contingency_fund_percent >= 4 &&
-      (form.compliance_posture !== "High-Risk Facilitation" || form.facilitation_budget_index <= 60),
+  const stepChecklists: Record<StepIndex, ChecklistItem[]> = {
+    0: [
+      {
+        label: "Focus allocation totals exactly 100",
+        pass: focusSum === 100,
+        remainingLabel: "Balance focus allocation to exactly 100",
+      },
+      {
+        label: "Strategic posture selected",
+        pass: Boolean(form.strategic_posture),
+        remainingLabel: "Select Strategic Posture",
+      },
+      ...(deckEvents.length > 0
+        ? [
+            {
+              label: "Event deck decisions completed",
+              pass: eventDeckReady,
+              remainingLabel: "Decide all event deck actions",
+            },
+          ]
+        : []),
+    ],
+    1: [
+      {
+        label: "Primary sector selected",
+        pass: Boolean(form.primary_sector),
+        remainingLabel: "Select primary sector",
+      },
+      {
+        label: "Bid aggressiveness stays in range",
+        pass: form.bid_aggressiveness >= 1 && form.bid_aggressiveness <= 5,
+        remainingLabel: "Set bid aggressiveness between 1 and 5",
+      },
+      {
+        label: "Secondary sector does not duplicate the primary sector",
+        pass: form.secondary_sector === "None" || form.secondary_sector !== form.primary_sector,
+        remainingLabel: "Keep secondary sector different from the primary sector",
+      },
+    ],
+    2: [
+      {
+        label: "Training intensity is at least 20",
+        pass: form.training_intensity >= 20,
+        remainingLabel: "Raise training intensity to at least 20",
+      },
+      {
+        label: "Innovation budget index is at least 25",
+        pass: form.innovation_budget_index >= 25,
+        remainingLabel: "Raise innovation budget index to at least 25",
+      },
+      {
+        label: "Self-perform share is between 30 and 90",
+        pass: form.self_perform_percent >= 30 && form.self_perform_percent <= 90,
+        remainingLabel: "Keep self-perform share between 30% and 90%",
+      },
+    ],
+    3: [
+      {
+        label: "Inventory cover is at least 2 weeks",
+        pass: form.inventory_cover_weeks >= 2,
+        remainingLabel: "Increase inventory cover to at least 2 weeks",
+      },
+      {
+        label: "Community engagement is at least 30",
+        pass: form.community_engagement >= 30,
+        remainingLabel: "Raise community engagement to at least 30",
+      },
+      {
+        label: "Work-life balance index is at least 25",
+        pass: form.work_life_balance_index >= 25,
+        remainingLabel: "Raise work-life balance index to at least 25",
+      },
+    ],
+    4: [
+      {
+        label: "Cash buffer is at least 2 months",
+        pass: form.cash_buffer_months >= 2,
+        remainingLabel: "Increase cash buffer to at least 2 months",
+      },
+      {
+        label: "Contingency fund is at least 4%",
+        pass: form.contingency_fund_percent >= 4,
+        remainingLabel: "Increase contingency fund to at least 4%",
+      },
+      {
+        label: "High-risk facilitation budget stays controlled",
+        pass: form.compliance_posture !== "High-Risk Facilitation" || form.facilitation_budget_index <= 60,
+        remainingLabel: "Reduce facilitation risk budget to 60 or below",
+      },
+    ],
   };
 
-    const readinessChecks = [
-    { label: "Focus allocation totals exactly 100", pass: focusSum === 100 },
+  const stepValidations: Record<StepIndex, boolean> = {
+    0: stepChecklists[0].every((check) => check.pass),
+    1: stepChecklists[1].every((check) => check.pass),
+    2: stepChecklists[2].every((check) => check.pass),
+    3: stepChecklists[3].every((check) => check.pass),
+    4: stepChecklists[4].every((check) => check.pass),
+  };
+
+  const readinessChecks: ChecklistItem[] = [
+    {
+      label: "Focus allocation totals exactly 100",
+      pass: focusSum === 100,
+      remainingLabel: "Balance focus allocation to exactly 100",
+    },
     {
       label: "Team KPI target selected in Round 1",
       pass: roundNumber !== 1 || Boolean(teamKpiTarget || draftKpiTarget),
+      remainingLabel: "Select Team KPI target in Round 1",
+    },
+    {
+      label: "Strategic posture selected",
+      pass: Boolean(form.strategic_posture),
+      remainingLabel: "Select Strategic Posture",
+    },
+    {
+      label: "Event deck decisions completed when events are present",
+      pass: deckEvents.length === 0 || eventDeckReady,
+      remainingLabel: "Decide all event deck actions",
     },
     {
       label: "Primary sector selected and secondary sector not duplicated",
       pass: form.secondary_sector === "None" || form.secondary_sector !== form.primary_sector,
+      remainingLabel: "Select a primary sector and keep the secondary sector unique",
     },
     {
       label: "Expansion not overloaded by workforce",
       pass:
         form.market_expansion === "Consolidate Existing Regions" ||
         form.workforce_plan !== "Lean Core Team",
+      remainingLabel: "Avoid pairing expansion with a lean core team",
     },
     {
       label: "Aggressive risk has contingency cover",
       pass: form.risk_appetite !== "Aggressive" || form.contingency_fund_percent >= 8,
+      remainingLabel: "Increase contingency fund to at least 8% for aggressive risk",
     },
     {
       label: "Make-vs-buy mix is in stable operating range",
       pass: form.self_perform_percent >= 35 && form.self_perform_percent <= 85,
+      remainingLabel: "Keep self-perform share between 35% and 85%",
     },
     {
       label: "P&M utilization not in overload zone",
       pass: form.pm_utilization_target <= 88,
+      remainingLabel: "Reduce P&M utilization target to 88% or lower",
     },
     {
       label: "Quality guardrails align with speed",
       pass: form.focus_speed <= 35 || form.qa_audit_frequency !== "Monthly",
+      remainingLabel: "Increase QA cadence when speed focus is above 35",
     },
     {
       label: "Compliance risk budget controlled",
       pass: form.compliance_posture !== "High-Risk Facilitation" || form.facilitation_budget_index <= 40,
+      remainingLabel: "Reduce facilitation risk budget to 40 or lower",
     },
     {
       label: "Liquidity protection for current budget pressure",
       pass: budget.total_budget_pressure < 4800000 || form.cash_buffer_months >= 4,
+      remainingLabel: "Increase cash buffer to at least 4 months under current budget pressure",
     },
   ];
 
   const readinessScore = Math.round(
     (readinessChecks.filter((check) => check.pass).length / readinessChecks.length) * 100
   );
+  const readinessMissingChecks = readinessChecks.filter((check) => !check.pass);
+  const readinessRemainingText = readinessMissingChecks.length
+    ? readinessMissingChecks.map((check) => `Complete: ${check.remainingLabel ?? check.label}`).join(" • ")
+    : "Nothing blocking readiness right now.";
 
   function update<K extends keyof ExtendedDecisionForm>(key: K, value: ExtendedDecisionForm[K]) {
     setHasUnsavedChanges(true);
@@ -997,6 +1264,16 @@ export default function RoundDecisionPage() {
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [hasUnsavedChanges, locked, roundStatus]);
+
+  useEffect(() => {
+    if (!navigationNotice) return;
+
+    const timeoutId = window.setTimeout(() => {
+      setNavigationNotice(null);
+    }, 3200);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [navigationNotice]);
 
   useEffect(() => {
     const now = Date.now();
@@ -1068,16 +1345,6 @@ export default function RoundDecisionPage() {
 
   const msLeft = roundDeadlineIso ? Date.parse(roundDeadlineIso) - clockNow : null;
   const lockWindowExpired = msLeft !== null && msLeft <= 0;
-  const availableStep = (index: StepIndex) => {
-    if (index === 0) return true;
-
-    for (let i = 0; i < index; i++) {
-      const key = i as StepIndex;
-      if (!stepValidations[key]) return false;
-    }
-
-    return true;
-  };
 
   const submissionPressure = useMemo(() => {
     const nowIso = new Date(clockNow).toISOString();
@@ -1151,23 +1418,7 @@ export default function RoundDecisionPage() {
       }
     };
 
-    const syncSharedRoundState = async () => {
-      const { data: roundRowData, error: roundErr } = await supabase
-        .from("session_rounds")
-        .select("deadline_at,status,news_payload")
-        .eq("session_id", sessionId)
-        .eq("round_number", roundNumber)
-        .maybeSingle();
-
-      if (roundErr) {
-        if (!isMissingTableError(roundErr.message) && !cancelled) {
-          setError((prev) => prev || `Round orchestration sync failed: ${roundErr.message}`);
-        }
-        setFallbackDeadline();
-        return;
-      }
-
-      const row = roundRowData as SessionRoundRow | null;
+    const applySharedRoundState = (row: SessionRoundRow | null) => {
       if (!row) {
         if (!cancelled) {
           setRoundClockSource("shared");
@@ -1191,12 +1442,68 @@ export default function RoundDecisionPage() {
       }
     };
 
+    const syncSharedRoundState = async () => {
+      const { data: roundRowData, error: roundErr } = await supabase
+        .from("session_rounds")
+        .select("deadline_at,status,news_payload")
+        .eq("session_id", sessionId)
+        .eq("round_number", roundNumber)
+        .maybeSingle();
+
+      if (roundErr) {
+        if (!isMissingTableError(roundErr.message) && !cancelled) {
+          setError((prev) => prev || `Round orchestration sync failed: ${roundErr.message}`);
+        }
+        setFallbackDeadline();
+        return;
+      }
+
+      applySharedRoundState(roundRowData as SessionRoundRow | null);
+    };
+
     syncSharedRoundState();
     const intervalId = window.setInterval(syncSharedRoundState, 10000);
+    const roundChannel = supabase
+      .channel(`session-rounds:${sessionId}:${roundNumber}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "session_rounds",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        (payload) => {
+          const nextRecord =
+            payload.new && typeof payload.new === "object" ? (payload.new as Record<string, unknown>) : null;
+          const previousRecord =
+            payload.old && typeof payload.old === "object" ? (payload.old as Record<string, unknown>) : null;
+          const candidateRecord = nextRecord ?? previousRecord;
+
+          if (!candidateRecord) return;
+          if (candidateRecord.session_id !== sessionId) return;
+          if (Number(candidateRecord.round_number) !== roundNumber) return;
+
+          if (payload.eventType === "DELETE") {
+            applySharedRoundState(null);
+            return;
+          }
+
+          applySharedRoundState({
+            session_id: sessionId,
+            round_number: roundNumber,
+            deadline_at: typeof candidateRecord.deadline_at === "string" ? candidateRecord.deadline_at : null,
+            status: typeof candidateRecord.status === "string" ? candidateRecord.status : null,
+            news_payload: candidateRecord.news_payload,
+          });
+        }
+      )
+      .subscribe();
 
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
+      void supabase.removeChannel(roundChannel);
     };
   }, [roundNumber, roundEvents, sessionId, supabase, teamId, userId]);
 
@@ -1246,6 +1553,7 @@ export default function RoundDecisionPage() {
       activeStepRef.current = 0;
       stepStartRef.current = Date.now();
       setActiveStep(0);
+      setStepProjectContext(DEFAULT_STEP_PROJECT_CONTEXT);
 
       const { data: userData } = await supabase.auth.getUser();
       const user = userData.user;
@@ -1292,7 +1600,7 @@ export default function RoundDecisionPage() {
 
       const { data: teamsData, error: tErr } = await supabase
         .from("teams")
-        .select("id,team_name,session_id,kpi_target")
+        .select("id,team_name,session_id,kpi_target,scenario_id,identity_profile")
         .in("id", teamIds)
         .eq("session_id", sessionId);
 
@@ -1315,6 +1623,40 @@ export default function RoundDecisionPage() {
       const parsedKpi = parseKpiTarget(myTeam.kpi_target);
       setTeamKpiTarget(parsedKpi);
       setDraftKpiTarget(parsedKpi);
+
+      const identityProfile =
+        myTeam.identity_profile && typeof myTeam.identity_profile === "object"
+          ? myTeam.identity_profile
+          : {};
+      const positioningStrategy = toText(identityProfile.positioning_strategy, "Not selected");
+      let nextProjectContext: StepProjectContext = {
+        ...DEFAULT_STEP_PROJECT_CONTEXT,
+        positioningStrategy,
+        totalRounds: Math.max(sessionRow.round_count ?? 0, roundNumber, 1),
+      };
+
+      if (myTeam.scenario_id) {
+        const { data: scenarioData } = await supabase
+          .from("project_scenarios")
+          .select("name,client,base_budget_cr,duration_rounds,complexity")
+          .eq("id", myTeam.scenario_id)
+          .maybeSingle();
+
+        const scenario = (scenarioData as ScenarioRow | null) ?? null;
+        const projectName = toText(scenario?.name, DEFAULT_STEP_PROJECT_CONTEXT.projectName);
+
+        nextProjectContext = {
+          projectName,
+          client: toText(scenario?.client, DEFAULT_STEP_PROJECT_CONTEXT.client),
+          scenarioType: getScenarioTypeLabel(projectName),
+          positioningStrategy,
+          complexity: formatScenarioComplexity(scenario?.complexity),
+          baseBudgetCr: toNumberOrNull(scenario?.base_budget_cr),
+          totalRounds: Math.max(scenario?.duration_rounds ?? 0, sessionRow.round_count ?? 0, roundNumber, 1),
+        };
+      }
+
+      setStepProjectContext(nextProjectContext);
 
       const { data: existingData, error: dErr } = await supabase
         .from("decisions")
@@ -1792,10 +2134,34 @@ export default function RoundDecisionPage() {
     return items;
   }, [latePenaltyPreview.minutesLate, latePenaltyPreview.pointsPenalty, readinessScore]);
 
+  const getIncompleteStepMessage = (step: StepIndex) => {
+    const missingChecks = stepChecklists[step].filter((check) => !check.pass);
+    if (missingChecks.length === 0) return "";
+
+    const summary = missingChecks
+      .slice(0, 2)
+      .map((check) => check.remainingLabel ?? check.label)
+      .join("; ");
+    const remainder = missingChecks.length > 2 ? `; plus ${missingChecks.length - 2} more item(s)` : "";
+
+    return `Step ${step + 1} is incomplete - ${summary}${remainder}. Some fields may be missing.`;
+  };
+
+  const requestStepNavigation = (nextStep: StepIndex, source: string) => {
+    if (nextStep > activeStep && !stepValidations[activeStep]) {
+      const warningMessage = getIncompleteStepMessage(activeStep);
+      if (warningMessage) {
+        setNavigationNotice({ id: Date.now(), message: warningMessage });
+      }
+    }
+
+    navigateToStep(nextStep, source);
+  };
+
   const nextStep = () => {
     const candidate = Math.min(activeStep + 1, 4) as StepIndex;
-    if (availableStep(candidate)) {
-      navigateToStep(candidate, "next-button");
+    if (candidate !== activeStep) {
+      requestStepNavigation(candidate, "next-button");
     }
   };
 
@@ -1840,6 +2206,17 @@ export default function RoundDecisionPage() {
           onConfirm={lockAndGenerateResults}
           isSubmitting={locking}
         />
+        {navigationNotice ? (
+          <div className="pointer-events-none fixed inset-x-4 top-[110px] z-[70] flex justify-center">
+            <div
+              role="status"
+              aria-live="polite"
+              className="pointer-events-auto max-w-xl rounded-2xl border border-amber-400/30 bg-amber-500/15 px-4 py-3 text-sm font-semibold text-amber-100 shadow-2xl shadow-slate-950/30 backdrop-blur"
+            >
+              {navigationNotice.message}
+            </div>
+          </div>
+        ) : null}
         {/* HEADER ZONE */}
         <header className="sticky top-[60px] z-40 bg-slate-950/80 backdrop-blur-md border-b border-white/5 px-4 py-3 shadow-lg">
           <div className="max-w-[1180px] mx-auto flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -1940,21 +2317,19 @@ export default function RoundDecisionPage() {
                    {/* TAB BAR */}
                    <div className="hidden overflow-x-auto pb-2 scrollbar-hide">
                      <div className="flex gap-2 min-w-max">
-                       {stepTitles.map((title, index) => {
-                         const idx = index as StepIndex;
-                         const current = activeStep === idx;
-                         const unlocked = availableStep(idx);
-                         return (
-                           <button
-                             key={title}
-                             onClick={() => navigateToStep(idx, "stepper-tab")}
-                             disabled={!unlocked}
-                             className={`px-5 py-2.5 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-all ${
-                               current ? "bg-blue-600 text-white shadow-lg shadow-blue-500/20 border border-white/10" : "bg-slate-900/50 text-slate-400 border border-transparent hover:bg-slate-800"
-                             } ${!unlocked && "opacity-30 cursor-not-allowed"}`}
-                           >
-                             {String(index+1).padStart(2,"0")} <span className="opacity-50 mx-1">/</span> {title}
-                           </button>
+                        {stepTitles.map((title, index) => {
+                          const idx = index as StepIndex;
+                          const current = activeStep === idx;
+                          return (
+                            <button
+                              key={title}
+                              onClick={() => requestStepNavigation(idx, "stepper-tab")}
+                              className={`px-5 py-2.5 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-all ${
+                                current ? "bg-blue-600 text-white shadow-lg shadow-blue-500/20 border border-white/10" : "bg-slate-900/50 text-slate-400 border border-transparent hover:bg-slate-800"
+                              }`}
+                            >
+                              {String(index+1).padStart(2,"0")} <span className="opacity-50 mx-1">/</span> {title}
+                            </button>
                          );
                        })}
                      </div>
@@ -1963,7 +2338,10 @@ export default function RoundDecisionPage() {
                    {/* TAB CONTENT: STEP 1 */}
                    {activeStep === 0 && (
                      <div className="space-y-6 animate-in fade-in duration-300">
-                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                        <StepContextBanner>
+                          {`📍 ${stepProjectContext.projectName} | ${stepProjectContext.client} | Round ${roundNumber} of ${totalRounds}`}
+                        </StepContextBanner>
+                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Team KPI Target (4x points)</div>
                           {teamKpiTarget ? (
                             <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-400 font-bold shadow-inner flex justify-between items-center">
@@ -1988,18 +2366,24 @@ export default function RoundDecisionPage() {
                             </div>
                             <div className="space-y-6">
                               {deckEvents.map(evt => (
-                                <div key={evt.id} className="space-y-3 p-4 rounded-xl bg-slate-950/50 border border-slate-800">
-                                  <div>
+                                <div key={evt.id} className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950/50">
+                                  <img
+                                    src={getDecisionEventImageUrl(evt.title)}
+                                    alt={`${evt.title} context`}
+                                    className="h-24 w-full object-cover"
+                                    loading="lazy"
+                                  />
+                                  <div className="space-y-3 p-4">
                                     <div className="font-bold text-slate-200">{evt.title}</div>
                                     <div className="text-xs text-slate-400 mt-1 leading-relaxed">{evt.description}</div>
-                                  </div>
-                                  <div className="pt-2">
-                                    <SegmentedControl
-                                      options={evt.choices.map(c => ({ value: c.id, text: c.label, hint: c.theoryHint }))}
-                                      activeOption={eventsChosen[evt.id] || ""}
-                                      onSelect={(v) => updateEventChoice(evt.id, v)}
-                                      disabled={isLocked}
-                                    />
+                                    <div className="pt-2">
+                                      <SegmentedControl
+                                        options={evt.choices.map(c => ({ value: c.id, text: c.label, hint: c.theoryHint }))}
+                                        activeOption={eventsChosen[evt.id] || ""}
+                                        onSelect={(v) => updateEventChoice(evt.id, v)}
+                                        disabled={isLocked}
+                                      />
+                                    </div>
                                   </div>
                                 </div>
                               ))}
@@ -2009,7 +2393,15 @@ export default function RoundDecisionPage() {
 
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Live External Context</div>
-                          <SegmentedControl options={externalContextOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.external_context} onSelect={(v)=>update("external_context",v)} disabled={isLocked} />
+                          <SegmentedControl
+                            options={externalContextOptions.map((option) => ({
+                              value: option.value,
+                              text: `${option.icon} ${option.text}`,
+                            }))}
+                            activeOption={form.external_context}
+                            onSelect={(v)=>update("external_context",v)}
+                            disabled={isLocked}
+                          />
                         </div>
 
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
@@ -2035,7 +2427,10 @@ export default function RoundDecisionPage() {
                    {/* TAB CONTENT: STEP 2 */}
                    {activeStep === 1 && (
                      <div className="space-y-6 animate-in fade-in duration-300">
-                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                        <StepContextBanner>
+                          {`🏗️ Current portfolio: ${stepProjectContext.scenarioType} | Your strategy: ${stepProjectContext.positioningStrategy}`}
+                        </StepContextBanner>
+                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Sector Selection</div>
                           <SegmentedControl options={sectorOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.primary_sector} onSelect={(v)=>update("primary_sector",v)} disabled={isLocked} />
                           <div className="mt-4 flex flex-col bg-slate-950/50 rounded-xl p-4 border border-white/5">
@@ -2073,7 +2468,10 @@ export default function RoundDecisionPage() {
                    {/* TAB CONTENT: STEP 3 */}
                    {activeStep === 2 && (
                      <div className="space-y-6 animate-in fade-in duration-300">
-                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                        <StepContextBanner>
+                          {`👷 Team context: ${stepProjectContext.complexity} complexity project`}
+                        </StepContextBanner>
+                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Delivery Mix & Assets</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <DecisionSlider label="Self-Perform Share" value={form.self_perform_percent} min={0} max={100} suffix="%" onChange={v=>update("self_perform_percent",v)} disabled={isLocked} />
@@ -2111,7 +2509,10 @@ export default function RoundDecisionPage() {
                    {/* TAB CONTENT: STEP 4 */}
                    {activeStep === 3 && (
                      <div className="space-y-6 animate-in fade-in duration-300">
-                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                        <StepContextBanner>
+                          {`🤝 Stakeholder: ${stepProjectContext.client} expects ${stepProjectContext.complexity} compliance`}
+                        </StepContextBanner>
+                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Logistics & Buffer</div>
                           <SegmentedControl options={logisticsOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.logistics_resilience} onSelect={(v)=>update("logistics_resilience",v)} disabled={isLocked} />
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
@@ -2142,7 +2543,14 @@ export default function RoundDecisionPage() {
                    {/* TAB CONTENT: STEP 5 */}
                    {activeStep === 4 && (
                      <div className="space-y-6 animate-in fade-in duration-300">
-                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                        <StepContextBanner>
+                          {`💰 Base budget: ${
+                            stepProjectContext.baseBudgetCr === null
+                              ? "Pending"
+                              : `₹${formatBudgetCr(stepProjectContext.baseBudgetCr)} Cr`
+                          } | Rounds remaining: ${roundsRemaining}`}
+                        </StepContextBanner>
+                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                            <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Financing Strategy</div>
                            <SegmentedControl options={financingOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.financing_posture} onSelect={(v)=>update("financing_posture",v)} disabled={isLocked} />
                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
@@ -2223,12 +2631,12 @@ export default function RoundDecisionPage() {
                            );
                          })}
                        </div>
-                       <Button
-                         onClick={nextStep}
-                         disabled={activeStep === 4 || !stepValidations[activeStep] || isLocked}
-                         className="flex-1"
-                       >
-                         Next
+                      <Button
+                        onClick={nextStep}
+                        disabled={activeStep === 4 || isLocked}
+                        className="flex-1"
+                      >
+                        Next
                        </Button>
                      </div>
 
@@ -2275,18 +2683,16 @@ export default function RoundDecisionPage() {
                       {stepTitles.map((title, index) => {
                         const idx = index as StepIndex;
                         const current = activeStep === idx;
-                        const unlocked = availableStep(idx);
                         return (
                           <button
                             key={`sidebar-step-${title}`}
                             type="button"
-                            onClick={() => navigateToStep(idx, "stepper-sidebar")}
-                            disabled={!unlocked}
+                            onClick={() => requestStepNavigation(idx, "stepper-sidebar")}
                             className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-3 text-left transition ${
                               current
                                 ? "border-blue-500/40 bg-blue-500/15 text-white"
                                 : "border-white/5 bg-slate-950/70 text-slate-300 hover:border-white/10 hover:bg-slate-900"
-                            } ${!unlocked ? "cursor-not-allowed opacity-40" : ""}`}
+                            }`}
                           >
                             <div className="min-w-0">
                               <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">
@@ -2309,7 +2715,20 @@ export default function RoundDecisionPage() {
                     <div className="space-y-3 text-xs">
                       <div className="flex items-center justify-between gap-3">
                         <span className="font-bold uppercase tracking-[0.18em] text-slate-500">Readiness</span>
-                        <span className="font-semibold text-slate-200">{readinessScore}%</span>
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-slate-200">{readinessScore}%</span>
+                          <ChecklistPopover title="What's missing?" buttonLabel="What's missing?" items={readinessChecks} />
+                        </div>
+                      </div>
+                      <div className="h-2 rounded-full bg-slate-800">
+                        <div
+                          className="h-2 rounded-full bg-gradient-to-r from-blue-500 via-cyan-500 to-emerald-500 transition-all"
+                          style={{ width: `${readinessScore}%` }}
+                        />
+                      </div>
+                      <div className="text-[11px] leading-5 text-slate-400">
+                        <span className="font-bold uppercase tracking-[0.18em] text-slate-500">Remaining:</span>{" "}
+                        <span>{readinessRemainingText}</span>
                       </div>
                       <div className="flex items-center justify-between gap-3">
                         <span className="font-bold uppercase tracking-[0.18em] text-slate-500">Risk band</span>
@@ -2398,7 +2817,7 @@ export default function RoundDecisionPage() {
                      <div key={idx} className={`w-8 h-2 rounded-full transition-all ${activeStep === idx ? "bg-blue-500" : activeStep > idx ? "bg-blue-900" : "bg-slate-800"}`} />
                   ))}
                 </div>
-                <Button variant="ghost" onClick={nextStep} disabled={activeStep === 4 || !stepValidations[activeStep] || isLocked} className="text-slate-400 hover:text-white">
+                <Button variant="ghost" onClick={nextStep} disabled={activeStep === 4 || isLocked} className="text-slate-400 hover:text-white">
                   Next &gt;
                 </Button>
               </div>

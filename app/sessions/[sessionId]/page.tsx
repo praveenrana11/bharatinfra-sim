@@ -14,6 +14,7 @@ import { ConstructionEvent, getRoundConstructionEvents } from "@/lib/constructio
 import { computeRoundResultV2, DecisionDraft, RoundResult } from "@/lib/simEngine";
 import { parseDecisionProfile, DEFAULT_DECISION_PROFILE, DecisionProfile } from "@/lib/decisionProfile";
 import { parseKpiTarget, evaluateKpiAchievement, applyKpiMultiplier } from "@/lib/kpi";
+import { getScenarioHeroImageUrl } from "@/lib/simVisuals";
 import {
   BHARATINFRA_ONBOARDING_STORAGE_KEY,
   HOW_TO_PLAY_SEEN_EVENT,
@@ -579,6 +580,7 @@ export default function SessionPage() {
   const pointsTone = (value: number | null) => (value === null ? "neutral" : value >= 0 ? "success" : "danger") as "neutral" | "success" | "danger";
   const metricValue = (value: number | null, decimals = 0) => value === null ? "—" : decimals > 0 ? value.toFixed(decimals) : Math.round(value).toString();
 
+  const scenarioHeroImageUrl = getScenarioHeroImageUrl(scenarioName);
   return (
     <RequireAuth>
       <Page>
@@ -594,19 +596,27 @@ export default function SessionPage() {
             <Card variant="elevated"><CardBody className="space-y-4 p-6"><div className="h-8 w-1/3 animate-pulse rounded bg-white/10" /><div className="h-24 animate-pulse rounded-2xl bg-white/5" /></CardBody></Card>
           ) : (
             <>
-              <Card variant="elevated">
+              <Card variant="elevated" className="border-slate-800/90 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
                 <CardBody className="grid gap-6 p-6 lg:grid-cols-[1fr_auto_1fr] lg:items-center">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-3">
-                      <h1 className="text-heading-2 text-white">{scenarioName}</h1>
+                      <div className="flex items-center gap-3">
+                        <img
+                          src={scenarioHeroImageUrl}
+                          alt={`${scenarioName} thumbnail`}
+                          className="h-12 w-16 rounded-xl border border-white/10 object-cover"
+                          loading="lazy"
+                        />
+                        <h1 className="text-heading-2 text-slate-50">{scenarioName}</h1>
+                      </div>
                       <Badge tone="neutral">{scenarioClient}</Badge>
                     </div>
-                    <div className="mt-2 text-sm text-slate-400">{sessionName || "Simulation session"}</div>
+                    <div className="mt-2 text-sm text-slate-300">{sessionName || "Simulation session"}</div>
                   </div>
                   <div className="flex min-w-[260px] flex-col items-center gap-4">
                     <div className="text-center">
-                      <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-300">Round Progress</div>
-                      <div className="mt-2 text-3xl font-black text-white">Round {displayRound} of {Math.max(roundCount, 1)}</div>
+                      <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-200">Round Progress</div>
+                      <div className="mt-2 text-3xl font-black text-slate-50">Round {displayRound} of {Math.max(roundCount, 1)}</div>
                     </div>
                     <div className="flex items-center gap-3">
                       {Array.from({ length: Math.max(roundCount, 1) }, (_, index) => {
@@ -616,37 +626,37 @@ export default function SessionPage() {
                         return (
                           <div key={roundNumber} className="flex items-center gap-3">
                             <div className={`h-3.5 w-3.5 rounded-full border ${complete ? "border-amber-300 bg-amber-400" : current ? "border-amber-300 bg-amber-500" : "border-white/20 bg-transparent"}`} />
-                            {roundNumber < Math.max(roundCount, 1) ? <div className={`h-[2px] w-10 ${complete ? "bg-amber-400" : "bg-white/10"}`} /> : null}
+                            {roundNumber < Math.max(roundCount, 1) ? <div className={`h-[2px] w-10 ${complete ? "bg-amber-400" : "bg-slate-700"}`} /> : null}
                           </div>
                         );
                       })}
                     </div>
                   </div>
                   <div className="flex flex-col gap-3 lg:items-end">
-                    <div className="text-heading-3 text-white">{teamName}</div>
+                    <div className="text-heading-3 text-slate-50">{teamName}</div>
                     <Badge tone="info">Rank {currentTeamEntry?.currentRank ?? 1} of {Math.max(teamCount, 1)}</Badge>
-                    <div className="text-sm text-slate-400">Primary KPI: {teamKpi}</div>
+                    <div className="text-sm text-slate-300">Primary KPI: {teamKpi}</div>
                   </div>
                 </CardBody>
               </Card>
 
-              <Card variant="elevated">
+              <Card variant="elevated" className="border-slate-800/90 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
                 <CardBody className="space-y-6 p-6">
                   <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
                     <div className="space-y-4">
                       <div className="flex items-center gap-3">
                         <span className={`h-3.5 w-3.5 rounded-full ${roundTone === "success" ? "bg-emerald-400 animate-pulse" : roundTone === "warning" ? "bg-amber-400" : "bg-slate-400"}`} />
-                        <span className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-400">Round Status</span>
+                        <span className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-300">Round Status</span>
                       </div>
                       <div>
-                        <div className="text-heading-2 text-white">{roundTitle}</div>
-                        <p className="mt-3 max-w-3xl text-body text-brand-muted">{roundSubtitle}</p>
+                        <div className="text-heading-2 text-slate-50">{roundTitle}</div>
+                        <p className="mt-3 max-w-3xl text-body text-slate-300">{roundSubtitle}</p>
                       </div>
                     </div>
-                    <div className="min-w-[220px] rounded-[24px] border border-white/10 bg-slate-950/60 px-6 py-5 text-center">
-                      <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-500">Countdown</div>
+                    <div className="min-w-[220px] rounded-[24px] border border-amber-400/20 bg-slate-900/90 px-6 py-5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                      <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-200">Countdown</div>
                       <div className="mt-3 text-[2.75rem] font-black tracking-[-0.06em] text-white">{activeTimer}</div>
-                      <div className="mt-2 text-sm text-slate-400">{roundStatus === "open" ? "Round closes at the facilitator deadline" : "Timer activates when the round opens"}</div>
+                      <div className="mt-2 text-sm text-slate-300">{roundStatus === "open" ? "Round closes at the facilitator deadline" : "Timer activates when the round opens"}</div>
                     </div>
                   </div>
                   <div className="flex flex-col gap-3 sm:flex-row">
@@ -654,9 +664,9 @@ export default function SessionPage() {
                       <Button className="w-full rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 hover:from-amber-300 hover:to-orange-400">Enter Round Workspace</Button>
                     </Link>
                     <Link href={`/sessions/${sessionId}/report`} className="block">
-                      <Button variant="ghost" className="w-full rounded-2xl border border-white/10 bg-white/5 text-white hover:border-white/20 hover:bg-white/10">View Report</Button>
+                      <Button variant="ghost" className="w-full rounded-2xl border border-slate-700 bg-slate-900 text-slate-100 hover:border-slate-600 hover:bg-slate-800 hover:text-white">View Report</Button>
                     </Link>
-                    {showHowToPlayButton ? <Button variant="secondary" onClick={() => openHowToPlay(0)} className="rounded-2xl border-white/10 bg-white/5 text-white hover:border-white/20 hover:bg-white/10">How to Play</Button> : null}
+                    {showHowToPlayButton ? <Button variant="secondary" onClick={() => openHowToPlay(0)} className="rounded-2xl border-slate-700 bg-slate-900 text-slate-100 hover:border-slate-600 hover:bg-slate-800 hover:text-white">How to Play</Button> : null}
                   </div>
                 </CardBody>
               </Card>
@@ -669,10 +679,10 @@ export default function SessionPage() {
               </div>
 
               <div className={`grid gap-6 ${isHost ? "xl:grid-cols-[minmax(0,1fr)_320px]" : ""}`}>
-                <Card variant="elevated">
+                <Card variant="elevated" className="border-slate-800/90 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
                   <CardBody className="space-y-5 p-6">
                     <div className="flex items-center justify-between">
-                      <div><div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-300">Leaderboard</div><div className="mt-2 text-heading-3 text-white">Current standings</div></div>
+                      <div><div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-200">Leaderboard</div><div className="mt-2 text-heading-3 text-slate-50">Current standings</div></div>
                       <Badge tone="neutral">{teamCount} teams</Badge>
                     </div>
                     <div className="space-y-3">
@@ -680,10 +690,10 @@ export default function SessionPage() {
                         const direction = entry.currentRank < entry.previousRank ? "up" : entry.currentRank > entry.previousRank ? "down" : "flat";
                         const isCurrent = entry.id === teamId;
                         return (
-                          <div key={entry.id} className={`grid grid-cols-[56px_minmax(0,1fr)_auto] items-center gap-4 rounded-2xl border px-4 py-4 ${isCurrent ? "border-teal-400/25 border-l-4 border-l-teal-400 bg-teal-500/10" : "border-white/10 bg-white/5"}`}>
-                            <div className="text-2xl font-black text-white">{entry.currentRank}</div>
-                            <div className="min-w-0"><div className="truncate text-base font-semibold text-white">{entry.teamName}</div><div className="mt-1 text-sm text-slate-400">{isCurrent ? "Your team" : "Competitor team"}</div></div>
-                            <div className="flex flex-col items-end gap-2"><div className="text-lg font-black text-white">{entry.totalPoints}</div><DeltaArrow direction={direction} /></div>
+                          <div key={entry.id} className={`grid grid-cols-[56px_minmax(0,1fr)_auto] items-center gap-4 rounded-2xl border px-4 py-4 ${isCurrent ? "border-amber-400/30 border-l-4 border-l-amber-400 bg-amber-400/10" : "border-slate-800 bg-slate-900/70"}`}>
+                            <div className="text-2xl font-black text-slate-50">{entry.currentRank}</div>
+                            <div className="min-w-0"><div className="truncate text-base font-semibold text-slate-50">{entry.teamName}</div><div className="mt-1 text-sm text-slate-300">{isCurrent ? "Your team" : "Competitor team"}</div></div>
+                            <div className="flex flex-col items-end gap-2"><div className="text-lg font-black text-slate-50">{entry.totalPoints}</div><DeltaArrow direction={direction} /></div>
                           </div>
                         );
                       })}

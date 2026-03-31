@@ -10,7 +10,7 @@ type CardProps = React.HTMLAttributes<HTMLDivElement> & {
 
 const variantClasses: Record<CardVariant, string> = {
   default: "rounded-xl border border-brand-border bg-brand-card p-6 shadow-sm",
-  elevated: "rounded-xl bg-brand-card p-6 shadow-md",
+  elevated: "rounded-[28px] border border-slate-800/80 bg-slate-950/92 p-6 shadow-[0_18px_45px_rgba(2,6,23,0.32)] backdrop-blur-sm",
   metric: "rounded-xl border border-brand-border border-l-4 bg-brand-card p-5 shadow-sm",
   amber: "rounded-xl border border-amber-200 bg-amber-50 p-6",
 };
@@ -20,7 +20,7 @@ export const Card = React.forwardRef<HTMLDivElement, CardProps>(function Card(
   ref
 ) {
   const darkSurfacePattern = /(bg-(slate|gray|zinc|neutral|stone|black)|bg-\[#|from-(slate|gray|zinc|neutral|stone|black)|to-(slate|gray|zinc|neutral|stone|black))/;
-  const isDarkSurface = darkSurfacePattern.test(className ?? "");
+  const isDarkSurface = variant === "elevated" || darkSurfacePattern.test(className ?? "");
   const cardStyle = {
     ...style,
     "--card-title-color": isDarkSurface ? "#F8FAFC" : "#0F172A",
