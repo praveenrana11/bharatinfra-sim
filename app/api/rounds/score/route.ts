@@ -12,6 +12,7 @@ const LATE_PENALTY_CAP = 80;
 type ScoreRoundRequest = {
   sessionId?: string;
   roundNumber?: number;
+  teamId?: string;
 };
 
 type TeamRow = {
@@ -55,6 +56,15 @@ function asErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+class HttpError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 function computeLatePenalty(deadlineIso: string | null, submittedIso: string, sharedClock: boolean) {
   if (!deadlineIso || !sharedClock) {
     return {
@@ -96,8 +106,9 @@ function clamp(value: number, min: number, max: number) {
 
 function parseAuthToken(request: NextRequest) {
   const authHeader = request.headers.get("authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) return null;
-  const token = authHeader.slice("Bearer ".length).trim();
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match) return null;
+  const token = match[1]?.trim() ?? "";
   return token.length > 0 ? token : null;
 }
 
@@ -105,12 +116,13 @@ export async function POST(request: NextRequest) {
   try {
     const token = parseAuthToken(request);
     if (!token) {
-      return NextResponse.json({ error: "Missing bearer token." }, { status: 401 });
+      return NextResponse.json({ error: "No authorization token" }, { status: 401 });
     }
 
     const body = (await request.json().catch(() => null)) as ScoreRoundRequest | null;
     const sessionId = typeof body?.sessionId === "string" ? body.sessionId.trim() : "";
     const roundNumber = typeof body?.roundNumber === "number" ? Math.trunc(body.roundNumber) : NaN;
+    const requestedTeamId = typeof body?.teamId === "string" ? body.teamId.trim() : "";
 
     if (!sessionId || !Number.isFinite(roundNumber) || roundNumber <= 0) {
       return NextResponse.json({ error: "Invalid sessionId or roundNumber." }, { status: 400 });
@@ -124,13 +136,22 @@ export async function POST(request: NextRequest) {
     } = await supabase.auth.getUser(token);
 
     if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized user." }, { status: 401 });
+      return NextResponse.json(
+        { error: asErrorMessage(authError, "Unauthorized user.") },
+        { status: 401 }
+      );
     }
 
-    const { data: membershipData, error: membershipError } = await supabase
+    let membershipQuery = supabase
       .from("team_memberships")
       .select("team_id")
       .eq("user_id", user.id);
+
+    if (requestedTeamId) {
+      membershipQuery = membershipQuery.eq("team_id", requestedTeamId);
+    }
+
+    const { data: membershipData, error: membershipError } = await membershipQuery;
 
     if (membershipError) throw membershipError;
 
@@ -139,22 +160,30 @@ export async function POST(request: NextRequest) {
       .filter(Boolean);
 
     if (teamIds.length === 0) {
-      return NextResponse.json({ error: "No team membership found for this user." }, { status: 403 });
+      return NextResponse.json(
+        { error: "Team not found for this user/session" },
+        { status: 404 }
+      );
     }
 
-    const { data: teamRows, error: teamError } = await supabase
-      .from("teams")
-      .select("id,kpi_target")
-      .in("id", teamIds)
-      .eq("session_id", sessionId)
-      .order("id", { ascending: true })
-      .limit(1);
+    let teamQuery = supabase.from("teams").select("id,kpi_target").eq("session_id", sessionId);
+
+    if (requestedTeamId) {
+      teamQuery = teamQuery.eq("id", requestedTeamId);
+    } else {
+      teamQuery = teamQuery.in("id", teamIds).order("id", { ascending: true }).limit(1);
+    }
+
+    const { data: teamRows, error: teamError } = await teamQuery;
 
     if (teamError) throw teamError;
 
     const team = ((teamRows ?? []) as TeamRow[])[0] ?? null;
     if (!team) {
-      return NextResponse.json({ error: "User is not a member of this session." }, { status: 403 });
+      return NextResponse.json(
+        { error: "Team not found for this user/session" },
+        { status: 404 }
+      );
     }
 
     const teamId = team.id;
@@ -167,13 +196,14 @@ export async function POST(request: NextRequest) {
       .eq("session_id", sessionId)
       .eq("team_id", teamId)
       .eq("round_number", roundNumber)
+      .eq("locked", true)
       .maybeSingle();
 
     if (decisionError) throw decisionError;
 
     const decision = (decisionData as DecisionRow | null) ?? null;
-    if (!decision || !decision.locked) {
-      return NextResponse.json({ error: "Round is not locked for this team yet." }, { status: 409 });
+    if (!decision) {
+      return NextResponse.json({ error: "No locked decision found" }, { status: 404 });
     }
 
     const draft: DecisionDraft = {
@@ -312,7 +342,9 @@ export async function POST(request: NextRequest) {
       .from("team_results")
       .upsert(resultRow, { onConflict: "session_id,team_id,round_number" });
 
-    if (upsertError) throw upsertError;
+    if (upsertError) {
+      throw new HttpError(500, asErrorMessage(upsertError, "Scoring error"));
+    }
 
     const { data: allResultsData, error: allResultsError } = await supabase
       .from("team_results")
@@ -339,9 +371,10 @@ export async function POST(request: NextRequest) {
       submittedAt,
     });
   } catch (error: unknown) {
+    const status = error instanceof HttpError ? error.status : 500;
     return NextResponse.json(
       { error: asErrorMessage(error, "Secure round scoring failed.") },
-      { status: 500 }
+      { status }
     );
   }
 }

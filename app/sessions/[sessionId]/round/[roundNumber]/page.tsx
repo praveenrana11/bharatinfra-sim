@@ -425,6 +425,64 @@ function buildCoreDecision(form: ExtendedDecisionForm): DecisionDraft {
   };
 }
 
+function buildDecisionPersistencePayload(params: {
+  sessionId: string;
+  teamId: string;
+  roundNumber: number;
+  form: ExtendedDecisionForm;
+  activeStep: StepIndex;
+  focusSum: number;
+  readinessScore: number;
+  budget: BudgetBreakdown;
+  resolvedRoundEvents: ConstructionEvent[];
+  deckEvents: GameEvent[];
+  eventsChosen: Record<string, string>;
+  forecast: ForecastState;
+  locked: boolean;
+  submittedAt: string | null;
+}) {
+  const {
+    sessionId,
+    teamId,
+    roundNumber,
+    form,
+    activeStep,
+    focusSum,
+    readinessScore,
+    budget,
+    resolvedRoundEvents,
+    deckEvents,
+    eventsChosen,
+    forecast,
+    locked,
+    submittedAt,
+  } = params;
+  const core = buildCoreDecision(form);
+  const profileSnapshot = extractProfile(form);
+
+  return {
+    session_id: sessionId,
+    team_id: teamId,
+    round_number: roundNumber,
+    ...core,
+    raw: {
+      ...profileSnapshot,
+      focusSum,
+      readinessScore,
+      active_step: activeStep,
+      budget,
+      events: resolvedRoundEvents,
+      war_room_v2: {
+        eventsShown: deckEvents.map((event) => event.id),
+        eventsChosen: Object.entries(eventsChosen).map(([eventId, choiceId]) => ({ eventId, choiceId })),
+        forecast,
+      },
+    },
+    locked,
+    submitted_at: submittedAt,
+  };
+}
+
 function extractProfile(form: ExtendedDecisionForm): DecisionProfile {
   return {
     external_context: form.external_context,
@@ -524,11 +582,7 @@ function StepTile({
 
 function FieldLabel({ label, tooltip }: { label: string; tooltip?: TooltipCopy }) {
   return (
-    <span
-      className="inline-flex items-center gap-2"
-      onClick={(event) => event.stopPropagation()}
-      onPointerDown={(event) => event.stopPropagation()}
-    >
+    <span className="inline-flex items-center gap-2">
       <span>{label}</span>
       {tooltip ? <Tooltip title={tooltip.title} lines={tooltip.lines} /> : null}
     </span>
@@ -908,6 +962,11 @@ export default function RoundDecisionPage() {
     const currentStep = activeStepRef.current;
     snapshot[currentStep] = snapshot[currentStep] + Math.max(0, nowMs - stepStartRef.current);
     return snapshot;
+  }
+
+  function navigateToStep(nextStep: StepIndex, source: string) {
+    console.log("Step nav clicked, going to step:", nextStep, "from:", source);
+    setActiveStep(nextStep);
   }
 
   async function trackTelemetry(eventName: string, eventPayload: Record<string, unknown>) {
@@ -1388,31 +1447,23 @@ export default function RoundDecisionPage() {
       if (!teamId) throw new Error("Team not loaded yet.");
       await ensureTeamKpiTarget(false);
 
-      const core = buildCoreDecision(form);
-      const profileSnapshot = extractProfile(form);
-
       const { error: upErr } = await supabase.from("decisions").upsert(
-        {
-          session_id: sessionId,
-          team_id: teamId,
-          round_number: roundNumber,
-          ...core,
-          raw: {
-            ...profileSnapshot,
-            focusSum,
-            readinessScore,
-            active_step: activeStep,
-            budget,
-            events: resolvedRoundEvents,
-            war_room_v2: {
-              eventsShown: deckEvents.map(e => e.id),
-              eventsChosen: Object.entries(eventsChosen).map(([eventId, choiceId]) => ({ eventId, choiceId })),
-              forecast: forecast
-            },
-          },
+        buildDecisionPersistencePayload({
+          sessionId,
+          teamId,
+          roundNumber,
+          form,
+          activeStep,
+          focusSum,
+          readinessScore,
+          budget,
+          resolvedRoundEvents,
+          deckEvents,
+          eventsChosen,
+          forecast,
           locked: false,
-          submitted_at: null,
-        },
+          submittedAt: null,
+        }),
         { onConflict: "session_id,team_id,round_number" }
       );
 
@@ -1451,33 +1502,26 @@ export default function RoundDecisionPage() {
 
       await ensureTeamKpiTarget(true);
 
-      const core = buildCoreDecision(form);
-      const currentProfile = extractProfile(form);
       const submittedAt = new Date().toISOString();
       const latePenaltyPreview = computeLatePenalty(roundDeadlineIso, submittedAt, roundClockSource);
 
       const { error: lockErr } = await supabase.from("decisions").upsert(
-        {
-          session_id: sessionId,
-          team_id: teamId,
-          round_number: roundNumber,
-          ...core,
-          raw: {
-            ...currentProfile,
-            focusSum,
-            readinessScore,
-            active_step: activeStep,
-            budget,
-            events: resolvedRoundEvents,
-            war_room_v2: {
-              eventsShown: deckEvents.map(e => e.id),
-              eventsChosen: Object.entries(eventsChosen).map(([eventId, choiceId]) => ({ eventId, choiceId })),
-              forecast: forecast
-            },
-          },
+        buildDecisionPersistencePayload({
+          sessionId,
+          teamId,
+          roundNumber,
+          form,
+          activeStep,
+          focusSum,
+          readinessScore,
+          budget,
+          resolvedRoundEvents,
+          deckEvents,
+          eventsChosen,
+          forecast,
           locked: true,
-          submitted_at: submittedAt,
-        },
+          submittedAt,
+        }),
         { onConflict: "session_id,team_id,round_number" }
       );
 
@@ -1486,6 +1530,7 @@ export default function RoundDecisionPage() {
         supabase,
         sessionId,
         roundNumber,
+        teamId,
       });
 
 
@@ -1566,8 +1611,11 @@ export default function RoundDecisionPage() {
       setShowLockConfirmation(false);
       router.push(`/sessions/${sessionId}/round/${roundNumber}/results`);
     } catch (unknownError: unknown) {
+      const message = toErrorMessage(unknownError, "Failed to lock and generate results");
+      console.error("Round lock failed", unknownError);
       setShowLockConfirmation(false);
-      setError(toErrorMessage(unknownError, "Failed to lock and generate results"));
+      setError(message);
+      window.scrollTo({ top: 0, behavior: "smooth" });
     } finally {
       setLocking(false);
     }
@@ -1747,13 +1795,13 @@ export default function RoundDecisionPage() {
   const nextStep = () => {
     const candidate = Math.min(activeStep + 1, 4) as StepIndex;
     if (availableStep(candidate)) {
-      setActiveStep(candidate);
+      navigateToStep(candidate, "next-button");
     }
   };
 
   const prevStep = () => {
     const candidate = Math.max(activeStep - 1, 0) as StepIndex;
-    setActiveStep(candidate);
+    navigateToStep(candidate, "previous-button");
   };
 
   const showWaitingForRound = !locked && roundStatus === "pending";
@@ -1787,7 +1835,7 @@ export default function RoundDecisionPage() {
           onClose={() => setShowLockConfirmation(false)}
           onReview={() => {
             setShowLockConfirmation(false);
-            setActiveStep(0);
+            navigateToStep(0, "lock-review");
           }}
           onConfirm={lockAndGenerateResults}
           isSubmitting={locking}
@@ -1828,7 +1876,11 @@ export default function RoundDecisionPage() {
         {/* MAIN ZONE */}
         <main className="w-full max-w-[1180px] mx-auto p-4 md:p-6 space-y-6">
           {error && (
-            <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-400 shadow-inner">
+            <div
+              role="alert"
+              aria-live="assertive"
+              className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-400 shadow-inner"
+            >
               {error}
             </div>
           )}
@@ -1895,7 +1947,7 @@ export default function RoundDecisionPage() {
                          return (
                            <button
                              key={title}
-                             onClick={() => setActiveStep(idx)}
+                             onClick={() => navigateToStep(idx, "stepper-tab")}
                              disabled={!unlocked}
                              className={`px-5 py-2.5 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-all ${
                                current ? "bg-blue-600 text-white shadow-lg shadow-blue-500/20 border border-white/10" : "bg-slate-900/50 text-slate-400 border border-transparent hover:bg-slate-800"
@@ -2228,7 +2280,7 @@ export default function RoundDecisionPage() {
                           <button
                             key={`sidebar-step-${title}`}
                             type="button"
-                            onClick={() => setActiveStep(idx)}
+                            onClick={() => navigateToStep(idx, "stepper-sidebar")}
                             disabled={!unlocked}
                             className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-3 text-left transition ${
                               current

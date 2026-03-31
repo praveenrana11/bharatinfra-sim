@@ -33,8 +33,9 @@ export async function scoreRoundSecureClient(params: {
   supabase: SupabaseClient;
   sessionId: string;
   roundNumber: number;
+  teamId?: string;
 }): Promise<SecureScoreRoundResponse> {
-  const { supabase, sessionId, roundNumber } = params;
+  const { supabase, sessionId, roundNumber, teamId } = params;
 
   const {
     data: { session },
@@ -51,15 +52,22 @@ export async function scoreRoundSecureClient(params: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${session.access_token}`,
     },
-    body: JSON.stringify({ sessionId, roundNumber }),
+    body: JSON.stringify({ sessionId, roundNumber, teamId }),
   });
 
-  const payload = (await response.json().catch(() => null)) as
-    | (Partial<SecureScoreRoundResponse> & { error?: string })
-    | null;
+  const responseText = await response.text();
+  let payload: (Partial<SecureScoreRoundResponse> & { error?: string }) | null = null;
+
+  if (responseText) {
+    try {
+      payload = JSON.parse(responseText) as Partial<SecureScoreRoundResponse> & { error?: string };
+    } catch {
+      payload = { error: responseText };
+    }
+  }
 
   if (!response.ok) {
-    throw new Error(payload?.error ?? "Secure scoring failed.");
+    throw new Error(payload?.error ?? `Secure scoring failed (${response.status}).`);
   }
 
   if (!payload?.result || !payload.latePenalty || typeof payload.submittedAt !== "string") {
