@@ -524,7 +524,11 @@ function StepTile({
 
 function FieldLabel({ label, tooltip }: { label: string; tooltip?: TooltipCopy }) {
   return (
-    <span className="inline-flex items-center gap-2">
+    <span
+      className="inline-flex items-center gap-2"
+      onClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
       <span>{label}</span>
       {tooltip ? <Tooltip title={tooltip.title} lines={tooltip.lines} /> : null}
     </span>
@@ -788,7 +792,7 @@ export default function RoundDecisionPage() {
   const [clockNow, setClockNow] = useState(Date.now());
   const [roundDeadlineIso, setRoundDeadlineIso] = useState<string | null>(null);
   const [roundClockSource, setRoundClockSource] = useState<RoundClockSource>("fallback");
-  const [roundStatus, setRoundStatus] = useState<"open" | "closed">("open");
+  const [roundStatus, setRoundStatus] = useState<"pending" | "open" | "closed">("pending");
   const [lockedTeamsCount, setLockedTeamsCount] = useState(0);
   const [totalTeamsCount, setTotalTeamsCount] = useState(0);
 
@@ -1076,12 +1080,14 @@ export default function RoundDecisionPage() {
         if (!cancelled) {
           setRoundDeadlineIso(new Date(deadlineMs).toISOString());
           setRoundClockSource("fallback");
+          setRoundStatus("open");
         }
       } catch {
         const fallback = Date.now() + ROUND_LOCK_WINDOW_MINUTES * 60_000;
         if (!cancelled) {
           setRoundDeadlineIso(new Date(fallback).toISOString());
           setRoundClockSource("fallback");
+          setRoundStatus("open");
         }
       }
     };
@@ -1106,20 +1112,22 @@ export default function RoundDecisionPage() {
       if (!row) {
         if (!cancelled) {
           setRoundClockSource("shared");
-          setRoundStatus("closed");
+          setRoundStatus("pending");
           setRoundDeadlineIso(null);
           setResolvedRoundEvents(roundEvents);
-          setError((prev) => prev || "Round is not opened by facilitator yet.");
+          setError((prev) => (prev === "Round is closed by facilitator." ? "" : prev));
         }
         return;
       }
 
       if (!cancelled) {
+        const sharedRoundStatus =
+          row.status === "closed" ? "closed" : row.status === "open" || Boolean(row.deadline_at) ? "open" : "pending";
         setRoundDeadlineIso(row.deadline_at);
         setRoundClockSource("shared");
-        setRoundStatus(row.status === "closed" ? "closed" : "open");
-        if (row.status === "closed") setError((prev) => prev || "Round is closed by facilitator.");
-        if (row.status !== "closed") setError((prev) => (prev === "Round is closed by facilitator." || prev === "Round is not opened by facilitator yet." ? "" : prev));
+        setRoundStatus(sharedRoundStatus);
+        if (sharedRoundStatus === "closed") setError((prev) => prev || "Round is closed by facilitator.");
+        if (sharedRoundStatus !== "closed") setError((prev) => (prev === "Round is closed by facilitator." ? "" : prev));
         setResolvedRoundEvents(parseRoundEventsPayload(row.news_payload) ?? roundEvents);
       }
     };
@@ -1748,7 +1756,26 @@ export default function RoundDecisionPage() {
     setActiveStep(candidate);
   };
 
+  const showWaitingForRound = !locked && roundStatus === "pending";
   const isLocked = locked || roundStatus !== "open" || lockBlockedByDeadline;
+  const headerStatusLabel = locked
+    ? "LOCKED"
+    : roundStatus === "pending"
+      ? "WAITING"
+      : roundStatus === "closed"
+        ? "CLOSED"
+        : "DRAFTING";
+  const headerStatusTone = locked || roundStatus === "closed"
+    ? "bg-rose-500/20 text-rose-400 border border-rose-500/30"
+    : roundStatus === "pending"
+      ? "border-amber-500/30 bg-amber-500/15 text-amber-300"
+      : "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
+  const headerStatusMessage =
+    roundStatus === "open"
+      ? submissionPressure.message
+      : roundStatus === "pending"
+        ? "Facilitator has not opened this round yet."
+        : `${formatStatus(roundStatus)}. Awaiting next step.`;
 
   return (
     <RequireAuth>
@@ -1774,11 +1801,7 @@ export default function RoundDecisionPage() {
                   <svg className="w-5 h-5 block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
                 </Link>
                 <h1 className="text-lg font-black text-white uppercase tracking-tight">Round {roundNumber} War Room</h1>
-                {isLocked ? (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-bold tracking-widest bg-rose-500/20 text-rose-400 border border-rose-500/30">LOCKED</span>
-                ) : (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-bold tracking-widest bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">DRAFTING</span>
-                )}
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-widest ${headerStatusTone}`}>{headerStatusLabel}</span>
               </div>
               <div className="mt-1 flex items-center gap-3 text-[10px] text-slate-500 uppercase tracking-widest font-semibold ml-8">
                 <span>{teamName}</span>
@@ -1796,7 +1819,7 @@ export default function RoundDecisionPage() {
                   lockWindowExpired ? "text-rose-300" : "text-slate-400"
                 }`}
               >
-                {roundStatus === "open" ? submissionPressure.message : `${formatStatus(roundStatus)}. Awaiting next step.`}
+                {headerStatusMessage}
               </span>
             </div>
           </div>
@@ -1814,6 +1837,19 @@ export default function RoundDecisionPage() {
                <div className="h-10 w-48 bg-slate-800 rounded-lg" />
                <div className="h-64 rounded-xl bg-slate-900/50 border border-white/5" />
              </div>
+          ) : showWaitingForRound ? (
+            <div className="space-y-6">
+              <section className="rounded-[28px] border border-amber-500/20 bg-gradient-to-br from-amber-500/12 via-slate-950/90 to-slate-950 px-6 py-8 text-center shadow-[0_24px_60px_rgba(15,23,42,0.35)]">
+                <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full border border-amber-400/25 bg-amber-500/10 text-4xl">
+                  ⏳
+                </div>
+                <h2 className="mt-5 text-2xl font-black uppercase tracking-tight text-white">Waiting for Round to Open</h2>
+                <p className="mx-auto mt-3 max-w-2xl text-sm leading-7 text-slate-300">
+                  Your facilitator will open this round shortly. Use this time to discuss strategy with your team.
+                </p>
+              </section>
+              <RoundBriefingCard sessionId={sessionId} roundNumber={roundNumber} teamId={teamId} />
+            </div>
           ) : (
              <>
                 <RoundBriefingCard sessionId={sessionId} roundNumber={roundNumber} teamId={teamId} />
@@ -2276,7 +2312,7 @@ export default function RoundDecisionPage() {
           )}
         </main>
 
-        {!loading ? (
+        {!loading && !showWaitingForRound ? (
           <div className="fixed inset-x-4 bottom-4 z-50 rounded-2xl border border-white/10 bg-slate-950/95 px-4 py-3 shadow-[0_18px_45px_rgba(2,6,23,0.55)] backdrop-blur-xl md:hidden">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
@@ -2298,7 +2334,7 @@ export default function RoundDecisionPage() {
         ) : null}
 
         {/* FOOTER CTA ZONE (Sticky) */}
-        {!loading && (
+        {!loading && !showWaitingForRound && (
           <footer className="fixed bottom-0 left-0 right-0 z-50 hidden border-t border-white/10 bg-[#020617]/90 p-4 shadow-[0_-20px_40px_rgba(0,0,0,0.5)] backdrop-blur-xl md:block">
             <div className="max-w-[1180px] mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div className="flex items-center justify-between md:justify-start w-full md:w-auto gap-4">

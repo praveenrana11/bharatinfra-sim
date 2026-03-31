@@ -22,12 +22,14 @@ import {
 
 type RouteParams = { sessionId?: string };
 type MembershipRow = { team_id: string };
+type IdentityProfile = { primary_kpi?: string | null };
 type TeamRow = {
   id: string;
   team_name: string;
   session_id: string;
   total_points: number | null;
   kpi_target: string | null;
+  identity_profile: IdentityProfile | null;
   identity_completed: boolean;
   scenario_id: string | null;
 };
@@ -75,6 +77,8 @@ const isMissingTableError = (message: string) => {
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 const isSessionCompleted = (status: string | null | undefined) => ["complete", "completed"].includes(status?.toLowerCase() ?? "");
 const formatClock = (ms: number) => `${String(Math.floor(Math.max(0, ms) / 60000)).padStart(2, "0")}:${String(Math.floor((Math.max(0, ms) % 60000) / 1000)).padStart(2, "0")}`;
+const resolvePrimaryKpi = (team: Pick<TeamRow, "kpi_target" | "identity_profile">) =>
+  team.kpi_target ?? team.identity_profile?.primary_kpi ?? "Not selected";
 const buildDecisionFromRow = (row: DecisionRow): DecisionDraft => ({
   focus_cost: row.focus_cost,
   focus_quality: row.focus_quality,
@@ -232,7 +236,7 @@ export default function SessionPage() {
       if (membershipErr) return void (setError(membershipErr.message), setLoading(false));
 
       const teamIds = ((membershipsData ?? []) as MembershipRow[]).map((row) => row.team_id);
-      const { data: teamsData, error: teamsErr } = await supabase.from("teams").select("id, team_name, session_id, total_points, kpi_target, identity_completed, scenario_id").in("id", teamIds).eq("session_id", sessionId);
+      const { data: teamsData, error: teamsErr } = await supabase.from("teams").select("id, team_name, session_id, total_points, kpi_target, identity_profile, identity_completed, scenario_id").in("id", teamIds).eq("session_id", sessionId);
       if (teamsErr) return void (setError(teamsErr.message), setLoading(false));
 
       const myTeam = ((teamsData ?? []) as TeamRow[])[0];
@@ -241,7 +245,7 @@ export default function SessionPage() {
       setTeamId(myTeam.id);
       setTeamName(myTeam.team_name ?? "");
       setPoints(myTeam.total_points ?? 0);
-      setTeamKpi(myTeam.kpi_target ?? "Not selected");
+      setTeamKpi(resolvePrimaryKpi(myTeam));
       if (!myTeam.identity_completed && !isSessionCompleted(session.status)) return void router.replace(`/sessions/${sessionId}/identity`);
 
       const { data: lastResultData, error: resultErr } = await supabase.from("team_results").select("round_number").eq("session_id", sessionId).eq("team_id", myTeam.id).order("round_number", { ascending: false }).limit(1).maybeSingle();
