@@ -11,14 +11,10 @@ import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Alert } from "@/components/ui/Alert";
+import { TEAM_MEMBER_ROLES, TeamMemberRole, getRoleLabel, getRoleName } from "@/lib/rolePermissions";
 
 type RouteParams = { sessionId?: string };
 type StepIndex = 0 | 1 | 2 | 3;
-type RoleName =
-  | "Project Director"
-  | "Finance & Contracts Head"
-  | "HSE Manager"
-  | "Planning Manager";
 type PositioningName =
   | "Cost Leadership"
   | "Quality & Compliance"
@@ -27,7 +23,8 @@ type PositioningName =
 type IdentityProfile = {
   company_name?: string;
   tagline?: string;
-  roles?: Partial<Record<RoleName, string>>;
+  member_roles?: Partial<Record<string, TeamMemberRole>>;
+  role_assignments?: Partial<Record<TeamMemberRole, string>>;
   positioning_strategy?: PositioningName;
   kpi_targets?: string[];
   primary_kpi?: string;
@@ -49,8 +46,13 @@ type TeamRow = {
   identity_completed: boolean;
   scenario_id: string | null;
 };
-type TeamMemberRow = { user_id: string; team_role: string | null; is_team_lead: boolean | null };
-type TeamMemberOption = { key: string; label: string };
+type TeamMemberRow = {
+  user_id: string;
+  team_role: string | null;
+  is_team_lead: boolean | null;
+  member_role: TeamMemberRole | null;
+};
+type TeamMemberOption = { key: string; label: string; memberRole: TeamMemberRole | null };
 type RoundStatusRow = { status: string | null };
 type ScenarioRow = {
   id: string;
@@ -76,13 +78,6 @@ type KpiOption = {
   description: string;
   icon: string;
 };
-
-const ROLE_NAMES: RoleName[] = [
-  "Project Director",
-  "Finance & Contracts Head",
-  "HSE Manager",
-  "Planning Manager",
-];
 
 const STEP_TITLES = [
   "Company Profile",
@@ -128,23 +123,28 @@ const KPI_OPTIONS: KpiOption[] = [
   { title: "Quality Compliance Rate", description: "Snag-free handovers", icon: "\u2705" },
 ];
 
-const EMPTY_ROLES: Record<RoleName, string> = {
-  "Project Director": "",
-  "Finance & Contracts Head": "",
-  "HSE Manager": "",
-  "Planning Manager": "",
-};
+function isTeamMemberRole(value: unknown): value is TeamMemberRole {
+  return typeof value === "string" && TEAM_MEMBER_ROLES.includes(value as TeamMemberRole);
+}
 
 function normalizeProfile(raw: IdentityProfile | null): IdentityProfile {
-  if (!raw || typeof raw !== "object") return { roles: { ...EMPTY_ROLES }, kpi_targets: [] };
-  const roles = { ...EMPTY_ROLES };
-  for (const role of ROLE_NAMES) {
-    roles[role] = typeof raw.roles?.[role] === "string" ? raw.roles[role]! : "";
-  }
+  if (!raw || typeof raw !== "object") return { member_roles: {}, role_assignments: {}, kpi_targets: [] };
+
+  const memberRoles = Object.fromEntries(
+    Object.entries(raw.member_roles ?? {}).filter((entry): entry is [string, TeamMemberRole] => isTeamMemberRole(entry[1]))
+  );
+  const roleAssignments = Object.fromEntries(
+    Object.entries(raw.role_assignments ?? {}).filter((entry): entry is [TeamMemberRole, string] => {
+      const [role, value] = entry;
+      return isTeamMemberRole(role) && typeof value === "string" && value.trim().length > 0;
+    })
+  );
+
   return {
     company_name: typeof raw.company_name === "string" ? raw.company_name : "",
     tagline: typeof raw.tagline === "string" ? raw.tagline : "",
-    roles,
+    member_roles: memberRoles,
+    role_assignments: roleAssignments,
     positioning_strategy:
       raw.positioning_strategy && POSITIONING_OPTIONS.some((option) => option.value === raw.positioning_strategy)
         ? raw.positioning_strategy
@@ -156,8 +156,15 @@ function normalizeProfile(raw: IdentityProfile | null): IdentityProfile {
   };
 }
 
-function dedupe(values: string[]) {
-  return Array.from(new Set(values.filter(Boolean)));
+function buildRoleAssignments(
+  members: TeamMemberOption[],
+  assignments: Record<string, TeamMemberRole | "">
+): Partial<Record<TeamMemberRole, string>> {
+  return members.reduce<Partial<Record<TeamMemberRole, string>>>((accumulator, member) => {
+    const role = assignments[member.key];
+    if (role) accumulator[role] = member.label;
+    return accumulator;
+  }, {});
 }
 
 function formatBudget(value: number | string | null) {
@@ -182,11 +189,12 @@ function getScenarioTypeMeta(name: string) {
   return { icon: "\u{1F3D7}\uFE0F", label: "Project" };
 }
 
-function resolveInitialStep(profile: IdentityProfile, scenarioId: string | null): StepIndex {
+function resolveInitialStep(profile: IdentityProfile, scenarioId: string | null, rosterIds: string[]): StepIndex {
   const companyReady =
     Boolean(profile.company_name?.trim()) &&
     Boolean(profile.tagline?.trim()) &&
-    ROLE_NAMES.every((role) => Boolean(profile.roles?.[role]?.trim()));
+    rosterIds.length > 0 &&
+    rosterIds.every((memberId) => isTeamMemberRole(profile.member_roles?.[memberId]));
   if (!companyReady) return 0;
   if (!scenarioId) return 1;
   if (!profile.positioning_strategy) return 2;
@@ -278,14 +286,21 @@ export default function SessionIdentityPage() {
 
   const [companyName, setCompanyName] = useState("");
   const [tagline, setTagline] = useState("");
-  const [roles, setRoles] = useState<Record<RoleName, string>>(EMPTY_ROLES);
+  const [memberRoleAssignments, setMemberRoleAssignments] = useState<Record<string, TeamMemberRole | "">>({});
   const [selectedScenarioId, setSelectedScenarioId] = useState("");
   const [positioningStrategy, setPositioningStrategy] = useState<PositioningName | "">("");
   const [selectedKpis, setSelectedKpis] = useState<string[]>([]);
   const [primaryKpi, setPrimaryKpi] = useState("");
 
+  const assignedRoles = memberOptions
+    .map((member) => memberRoleAssignments[member.key])
+    .filter((value): value is TeamMemberRole => Boolean(value));
+  const allMembersAssignedRole =
+    memberOptions.length > 0 && memberOptions.every((member) => Boolean(memberRoleAssignments[member.key]));
+  const uniqueRoleAssignments = new Set(assignedRoles).size === assignedRoles.length;
+
   const stepCompletion = [
-    Boolean(companyName.trim()) && Boolean(tagline.trim()) && ROLE_NAMES.every((role) => Boolean(roles[role]?.trim())),
+    Boolean(companyName.trim()) && Boolean(tagline.trim()) && allMembersAssignedRole && uniqueRoleAssignments,
     Boolean(selectedScenarioId),
     Boolean(positioningStrategy),
     selectedKpis.length === 3 && selectedKpis.includes(primaryKpi),
@@ -357,7 +372,7 @@ export default function SessionIdentityPage() {
             .eq("session_id", sessionId)
             .eq("round_number", activeRoundNumber)
             .maybeSingle(),
-          supabase.from("team_memberships").select("user_id,team_role,is_team_lead").eq("team_id", team.id),
+          supabase.from("team_memberships").select("user_id,team_role,is_team_lead,member_role").eq("team_id", team.id),
           supabase
             .from("project_scenarios")
             .select("id,name,client,description,base_budget_cr,duration_rounds,complexity")
@@ -384,16 +399,22 @@ export default function SessionIdentityPage() {
         "You";
 
       const roster = ((memberRows ?? []) as TeamMemberRow[]).map((member, index) => {
-        if (member.user_id === user.id) return { key: member.user_id, label: `${meLabel} (You)` };
-        if (member.team_role?.trim()) return { key: member.user_id, label: `${member.team_role.trim()} ${index + 1}` };
-        if (member.is_team_lead) return { key: member.user_id, label: `Team Lead ${index + 1}` };
-        return { key: member.user_id, label: `Member ${index + 1}` };
-      });
+        const label =
+          member.user_id === user.id
+            ? `${meLabel} (You)`
+            : member.team_role?.trim()
+              ? `${member.team_role.trim()} ${index + 1}`
+              : member.is_team_lead
+                ? `Team Lead ${index + 1}`
+                : `Member ${index + 1}`;
 
-      const options = dedupe([
-        ...roster.map((member) => member.label),
-        ...Object.values(profile.roles ?? {}).filter((value): value is string => typeof value === "string" && value.trim().length > 0),
-      ]).map((label) => ({ key: label, label }));
+        return { key: member.user_id, label, memberRole: member.member_role };
+      });
+      const roleAssignments = roster.reduce<Record<string, TeamMemberRole | "">>((accumulator, member) => {
+        const profileRole = profile.member_roles?.[member.key];
+        accumulator[member.key] = member.memberRole ?? (isTeamMemberRole(profileRole) ? profileRole : "");
+        return accumulator;
+      }, {});
 
       setSessionName(session.name ?? "Identity Setup");
       setSessionCode(session.code ?? "");
@@ -402,16 +423,16 @@ export default function SessionIdentityPage() {
       setTeamId(team.id);
       setTeamName(team.team_name?.trim() || profile.company_name?.trim() || "Project Team");
       setIdentityProfile(profile);
-      setMemberOptions(options.length > 0 ? options : [{ key: "Team Lead", label: "Team Lead" }]);
+      setMemberOptions(roster.length > 0 ? roster : [{ key: "team-lead", label: "Team Lead", memberRole: null }]);
       setScenarios((scenarioRows ?? []) as ScenarioRow[]);
       setCompanyName(profile.company_name ?? "");
       setTagline(profile.tagline ?? "");
-      setRoles({ ...EMPTY_ROLES, ...(profile.roles ?? {}) });
+      setMemberRoleAssignments(roleAssignments);
       setSelectedScenarioId(team.scenario_id ?? "");
       setPositioningStrategy(profile.positioning_strategy ?? "");
       setSelectedKpis(profile.kpi_targets ?? []);
       setPrimaryKpi(profile.primary_kpi ?? "");
-      setStepIndex(resolveInitialStep(profile, team.scenario_id));
+      setStepIndex(resolveInitialStep(profile, team.scenario_id, roster.map((member) => member.key)));
       setIsSessionHost(session.created_by === user.id);
 
       if (isSessionCompleted(session.status) || (team.identity_completed && session.created_by !== user.id)) {
@@ -435,6 +456,7 @@ export default function SessionIdentityPage() {
 
   async function persistIdentityStep(
     profilePatch: Partial<IdentityProfile>,
+    roleAssignmentsPatch?: Record<string, TeamMemberRole | "">,
     extraFields?: { scenario_id?: string; identity_completed?: boolean },
     successMessage?: string
   ) {
@@ -443,7 +465,18 @@ export default function SessionIdentityPage() {
     setSaveError("");
     setSaveNotice("");
 
-    const nextProfile: IdentityProfile = { ...identityProfile, ...profilePatch };
+    const nextMemberRoles = roleAssignmentsPatch
+      ? Object.fromEntries(
+          Object.entries(roleAssignmentsPatch).filter((entry): entry is [string, TeamMemberRole] => Boolean(entry[1]))
+        )
+      : identityProfile.member_roles ?? {};
+
+    const nextProfile: IdentityProfile = {
+      ...identityProfile,
+      ...profilePatch,
+      member_roles: nextMemberRoles,
+      role_assignments: buildRoleAssignments(memberOptions, roleAssignmentsPatch ?? memberRoleAssignments),
+    };
     const nextTeamName = nextProfile.company_name?.trim() ?? "";
     const updatePayload: {
       identity_profile: IdentityProfile;
@@ -457,6 +490,25 @@ export default function SessionIdentityPage() {
     if (extraFields?.scenario_id !== undefined) updatePayload.scenario_id = extraFields.scenario_id;
     if (extraFields?.identity_completed !== undefined) updatePayload.identity_completed = extraFields.identity_completed;
 
+    if (roleAssignmentsPatch) {
+      const roleUpdates = await Promise.all(
+        memberOptions.map((member) =>
+          supabase
+            .from("team_memberships")
+            .update({ member_role: roleAssignmentsPatch[member.key] || null })
+            .eq("team_id", teamId)
+            .eq("user_id", member.key)
+        )
+      );
+
+      const firstRoleError = roleUpdates.find((result) => result.error)?.error;
+      if (firstRoleError) {
+        setSaveError(firstRoleError.message);
+        setSaving(false);
+        return false;
+      }
+    }
+
     const { error: updateError } = await supabase.from("teams").update(updatePayload).eq("id", teamId);
     if (updateError) {
       setSaveError(updateError.message);
@@ -466,6 +518,15 @@ export default function SessionIdentityPage() {
 
     setIdentityProfile(nextProfile);
     if (nextTeamName) setTeamName(nextTeamName);
+    if (roleAssignmentsPatch) {
+      setMemberOptions((currentMembers) =>
+        currentMembers.map((member) => ({
+          ...member,
+          memberRole: (roleAssignmentsPatch[member.key] as TeamMemberRole | "") || null,
+        }))
+      );
+      setMemberRoleAssignments(roleAssignmentsPatch);
+    }
     if (successMessage) setSaveNotice(successMessage);
     setSaving(false);
     return true;
@@ -474,11 +535,16 @@ export default function SessionIdentityPage() {
   async function handleContinue() {
     if (stepIndex === 0) {
       if (!stepCompletion[0]) {
-        setSaveError("Complete company profile, tagline, and all four role assignments.");
+        setSaveError(
+          allMembersAssignedRole
+            ? "Keep each specialist role unique while completing company profile and tagline."
+            : "Complete company profile, tagline, and assign a specialist role to every roster member."
+        );
         return;
       }
       const saved = await persistIdentityStep(
-        { company_name: companyName.trim(), tagline: tagline.trim(), roles },
+        { company_name: companyName.trim(), tagline: tagline.trim() },
+        memberRoleAssignments,
         undefined,
         "Company profile saved."
       );
@@ -491,7 +557,7 @@ export default function SessionIdentityPage() {
         setSaveError("Select one project scenario to continue.");
         return;
       }
-      const saved = await persistIdentityStep({}, { scenario_id: selectedScenarioId }, "Project scenario saved.");
+      const saved = await persistIdentityStep({}, undefined, { scenario_id: selectedScenarioId }, "Project scenario saved.");
       if (saved) setStepIndex(2);
       return;
     }
@@ -503,6 +569,7 @@ export default function SessionIdentityPage() {
       }
       const saved = await persistIdentityStep(
         { positioning_strategy: positioningStrategy },
+        undefined,
         undefined,
         "Positioning strategy saved."
       );
@@ -517,6 +584,7 @@ export default function SessionIdentityPage() {
 
     const saved = await persistIdentityStep(
       { kpi_targets: selectedKpis, primary_kpi: primaryKpi },
+      undefined,
       { identity_completed: true },
       "Identity locked in."
     );
@@ -537,6 +605,17 @@ export default function SessionIdentityPage() {
 
     if (resetError) {
       setSaveError(resetError.message);
+      setResettingIdentity(false);
+      return;
+    }
+
+    const { error: membershipResetError } = await supabase
+      .from("team_memberships")
+      .update({ member_role: null })
+      .eq("team_id", teamId);
+
+    if (membershipResetError) {
+      setSaveError(membershipResetError.message);
       setResettingIdentity(false);
       return;
     }
@@ -701,32 +780,43 @@ export default function SessionIdentityPage() {
 
                             <div className="rounded-3xl border border-white/10 bg-white/5 p-5">
                               <div className="flex items-center justify-between gap-3">
-                                <div className="text-sm font-bold text-white">Role Assignment Matrix</div>
-                                <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">4 Required</div>
+                                <div className="text-sm font-bold text-white">Functional Specialist Assignment</div>
+                                <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">
+                                  {assignedRoles.length}/{memberOptions.length} assigned
+                                </div>
                               </div>
 
                               <div className="mt-5 grid gap-4">
-                                {ROLE_NAMES.map((role) => (
+                                {memberOptions.map((member) => (
                                   <div
-                                    key={role}
+                                    key={member.key}
                                     className="grid gap-3 rounded-2xl border border-white/10 bg-slate-950/70 p-4 md:grid-cols-[minmax(0,1fr)_220px]"
                                   >
                                     <div className="min-w-0">
-                                      <div className="text-sm font-semibold text-white">{role}</div>
-                                      <div className="mt-1 text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">Functional owner</div>
+                                      <div className="text-sm font-semibold text-white">{member.label}</div>
+                                      <div className="mt-1 text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">
+                                        {memberRoleAssignments[member.key]
+                                          ? getRoleName(memberRoleAssignments[member.key] as TeamMemberRole)
+                                          : "Role pending"}
+                                      </div>
                                     </div>
 
                                     <select
-                                      value={roles[role]}
-                                      onChange={(event) => setRoles((current) => ({ ...current, [role]: event.target.value }))}
+                                      value={memberRoleAssignments[member.key] ?? ""}
+                                      onChange={(event) =>
+                                        setMemberRoleAssignments((current) => ({
+                                          ...current,
+                                          [member.key]: event.target.value as TeamMemberRole | "",
+                                        }))
+                                      }
                                       className="h-11 rounded-2xl border border-white/10 bg-white/5 px-4 text-sm font-semibold text-white outline-none transition focus:border-amber-400/40 focus:bg-white/10"
                                     >
                                       <option value="" className="bg-slate-950">
-                                        Select owner
+                                        Select role
                                       </option>
-                                      {memberOptions.map((member) => (
-                                        <option key={`${role}-${member.key}`} value={member.label} className="bg-slate-950">
-                                          {member.label}
+                                      {TEAM_MEMBER_ROLES.map((role) => (
+                                        <option key={`${member.key}-${role}`} value={role} className="bg-slate-950">
+                                          {getRoleName(role)}
                                         </option>
                                       ))}
                                     </select>
@@ -744,9 +834,23 @@ export default function SessionIdentityPage() {
                                   key={member.key}
                                   className="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3"
                                 >
-                                  <div className="text-sm font-medium text-slate-100">{member.label}</div>
-                                  <div className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">
-                                    {index === 0 ? "Roster 01" : `Roster 0${Math.min(index + 1, 9)}`}
+                                  <div>
+                                    <div className="text-sm font-medium text-slate-100">{member.label}</div>
+                                    <div className="mt-1 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">
+                                      {memberRoleAssignments[member.key]
+                                        ? getRoleLabel(memberRoleAssignments[member.key] as TeamMemberRole)
+                                        : "Role not assigned"}
+                                    </div>
+                                  </div>
+                                  <div className="text-right">
+                                    <div className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">
+                                      {index === 0 ? "Roster 01" : `Roster 0${Math.min(index + 1, 9)}`}
+                                    </div>
+                                    <div className="mt-1 text-xs font-semibold text-slate-300">
+                                      {memberRoleAssignments[member.key]
+                                        ? getRoleName(memberRoleAssignments[member.key] as TeamMemberRole)
+                                        : "Pending"}
+                                    </div>
                                   </div>
                                 </div>
                               ))}
@@ -1025,6 +1129,12 @@ export default function SessionIdentityPage() {
                           </Button>
                         </div>
                       </div>
+
+                      {stepIndex === 0 && !uniqueRoleAssignments ? (
+                        <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                          Each team member needs a distinct specialist role so the round workspace has clear decision ownership.
+                        </div>
+                      ) : null}
 
                       {isSessionHost ? (
                         <div className="flex justify-end">

@@ -10,6 +10,7 @@ teams that hit resend limits during review or testing.
 - Client code uses only `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
 - Do not place a service-role key in client code.
 - Do not add admin-bypass routes for reviewers.
+- Secure server scoring also requires `SUPABASE_SERVICE_ROLE_KEY` in server environments only.
 
 ## Local environment variables
 
@@ -18,12 +19,16 @@ Add these values to `.env.local`:
 ```env
 NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN=true
 ```
 
 If you omit `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN`, the login page will expose both password and
 magic-link sign-in. Set it to `false` only if you need to hide password login.
+
+`SUPABASE_SERVICE_ROLE_KEY` is used only by the Next.js server route for secure round scoring.
+Do not expose it to the client or rename it with a `NEXT_PUBLIC_` prefix.
 
 ## Vercel environment variables
 
@@ -35,6 +40,7 @@ In Vercel:
 4. Add or confirm:
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - `SUPABASE_SERVICE_ROLE_KEY`
    - `NEXT_PUBLIC_APP_URL`
    - Optional: `NEXT_PUBLIC_ENABLE_PASSWORD_LOGIN` with value `false` if you want to hide password login
 5. Save the variables.

@@ -3,7 +3,12 @@ import { computeRoundResultV2, type DecisionDraft, type RoundResult } from "@/li
 import { parseDecisionProfile } from "@/lib/decisionProfile";
 import { parseKpiTarget, evaluateKpiAchievement, applyKpiMultiplier } from "@/lib/kpi";
 import { parseConstructionEvents } from "@/lib/newsPayload";
-import { getRoundConstructionEvents } from "@/lib/constructionNews";
+import { resolveRoundConstructionEvents } from "@/lib/constructionNews";
+import {
+  computeCarryover,
+  type Decision as CarryoverDecision,
+  type TeamResult as CarryoverTeamResult,
+} from "@/lib/consequenceEngine";
 import { getSupabaseAdminClient } from "@/lib/supabaseAdmin";
 
 const LATE_PENALTY_PER_MINUTE = 2;
@@ -18,6 +23,7 @@ type ScoreRoundRequest = {
 type TeamRow = {
   id: string;
   kpi_target: string | null;
+  scenario_id: string | null;
 };
 
 type DecisionRow = {
@@ -43,9 +49,25 @@ type PrevDecisionRawRow = {
   raw: Record<string, unknown> | null;
 };
 
+type ScenarioBudgetRow = {
+  base_budget_cr: number | string | null;
+};
+
 type TeamResultSummaryRow = {
   points_earned: number | null;
 };
+
+type CarryoverDecisionRow = CarryoverDecision;
+type CarryoverResultRow = CarryoverTeamResult;
+
+function toNumber(value: unknown, fallback = 0) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
 
 function asErrorMessage(error: unknown, fallback: string) {
   if (typeof error === "string") return error;
@@ -166,7 +188,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    let teamQuery = supabase.from("teams").select("id,kpi_target").eq("session_id", sessionId);
+    let teamQuery = supabase.from("teams").select("id,kpi_target,scenario_id").eq("session_id", sessionId);
 
     if (requestedTeamId) {
       teamQuery = teamQuery.eq("id", requestedTeamId);
@@ -187,6 +209,18 @@ export async function POST(request: NextRequest) {
     }
 
     const teamId = team.id;
+    let baseBudgetCr = 0;
+
+    if (team.scenario_id) {
+      const { data: scenarioData, error: scenarioError } = await supabase
+        .from("project_scenarios")
+        .select("base_budget_cr")
+        .eq("id", team.scenario_id)
+        .maybeSingle();
+
+      if (scenarioError) throw scenarioError;
+      baseBudgetCr = toNumber((scenarioData as ScenarioBudgetRow | null)?.base_budget_cr, 0);
+    }
 
     const { data: decisionData, error: decisionError } = await supabase
       .from("decisions")
@@ -221,12 +255,14 @@ export async function POST(request: NextRequest) {
 
     let prevResult: RoundResult | null = null;
     let prevProfile = null;
+    let priorCarryoverResults: CarryoverResultRow[] = [];
+    let priorCarryoverDecisions: CarryoverDecisionRow[] = [];
 
     if (roundNumber > 1) {
       const { data: prevResultData, error: prevResultError } = await supabase
         .from("team_results")
         .select(
-          "schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,detail"
+          "schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,ld_triggered,ld_amount_cr,ld_cumulative_cr,ld_weeks,ld_capped,detail"
         )
         .eq("session_id", sessionId)
         .eq("team_id", teamId)
@@ -236,9 +272,23 @@ export async function POST(request: NextRequest) {
       if (prevResultError) throw prevResultError;
 
       if (prevResultData) {
+        const prevRow = prevResultData as Partial<RoundResult> & { detail?: Record<string, unknown> };
         prevResult = {
-          ...(prevResultData as Omit<RoundResult, "detail">),
-          detail: (prevResultData as { detail?: Record<string, unknown> }).detail ?? {},
+          schedule_index: toNumber(prevRow.schedule_index, 0),
+          cost_index: toNumber(prevRow.cost_index, 0),
+          cash_closing: toNumber(prevRow.cash_closing, 0),
+          quality_score: toNumber(prevRow.quality_score, 0),
+          safety_score: toNumber(prevRow.safety_score, 0),
+          stakeholder_score: toNumber(prevRow.stakeholder_score, 0),
+          claim_entitlement_score: toNumber(prevRow.claim_entitlement_score, 0),
+          points_earned: toNumber(prevRow.points_earned, 0),
+          penalties: toNumber(prevRow.penalties, 0),
+          ld_triggered: Boolean(prevRow.ld_triggered),
+          ld_amount_cr: toNumber(prevRow.ld_amount_cr, 0),
+          ld_cumulative_cr: toNumber(prevRow.ld_cumulative_cr, 0),
+          ld_weeks: toNumber(prevRow.ld_weeks, 0),
+          ld_capped: Boolean(prevRow.ld_capped),
+          detail: prevRow.detail ?? {},
         };
       }
 
@@ -254,7 +304,32 @@ export async function POST(request: NextRequest) {
 
       const prevDecision = (prevDecisionData as PrevDecisionRawRow | null) ?? null;
       prevProfile = parseDecisionProfile(prevDecision?.raw ?? null);
+
+      const [carryoverResultsResponse, carryoverDecisionsResponse] = await Promise.all([
+        supabase
+          .from("team_results")
+          .select("cash_closing,stakeholder_score,ld_triggered,detail")
+          .eq("session_id", sessionId)
+          .eq("team_id", teamId)
+          .lt("round_number", roundNumber)
+          .order("round_number", { ascending: true }),
+        supabase
+          .from("decisions")
+          .select("focus_speed,governance_intensity,raw")
+          .eq("session_id", sessionId)
+          .eq("team_id", teamId)
+          .lt("round_number", roundNumber)
+          .order("round_number", { ascending: true }),
+      ]);
+
+      if (carryoverResultsResponse.error) throw carryoverResultsResponse.error;
+      if (carryoverDecisionsResponse.error) throw carryoverDecisionsResponse.error;
+
+      priorCarryoverResults = (carryoverResultsResponse.data ?? []) as CarryoverResultRow[];
+      priorCarryoverDecisions = (carryoverDecisionsResponse.data ?? []) as CarryoverDecisionRow[];
     }
+
+    const incomingCarryoverState = computeCarryover(priorCarryoverResults, priorCarryoverDecisions);
 
     const { data: roundRowData, error: roundRowError } = await supabase
       .from("session_rounds")
@@ -266,7 +341,16 @@ export async function POST(request: NextRequest) {
     if (roundRowError) throw roundRowError;
 
     const roundRow = (roundRowData as SessionRoundRow | null) ?? null;
-    const events = parseConstructionEvents(roundRow?.news_payload) ?? getRoundConstructionEvents(sessionId, roundNumber);
+    const decisionEvents = parseConstructionEvents(decision.raw?.events);
+    const sharedRoundEvents = parseConstructionEvents(roundRow?.news_payload);
+    const events =
+      decisionEvents ??
+      resolveRoundConstructionEvents({
+        sessionId,
+        roundNumber,
+        sharedEvents: sharedRoundEvents,
+        carryoverState: incomingCarryoverState,
+      });
 
     const seed = `${sessionId}:${teamId}:${roundNumber}`;
     const computed = computeRoundResultV2(draft, seed, {
@@ -274,6 +358,8 @@ export async function POST(request: NextRequest) {
       prevResult,
       prevProfile,
       events,
+      carryoverState: incomingCarryoverState,
+      baseBudgetCr,
     });
 
     const kpiTarget = parseKpiTarget(team.kpi_target);
@@ -288,6 +374,25 @@ export async function POST(request: NextRequest) {
     const latePenalty = computeLatePenalty(roundRow?.deadline_at ?? null, submittedAt, Boolean(roundRow?.deadline_at));
     const finalPoints = Math.max(0, boostedPoints - latePenalty.pointsPenalty);
     const finalStakeholder = clamp(computed.stakeholder_score - latePenalty.stakeholderPenalty, 0, 100);
+    const updatedCarryoverState = computeCarryover(
+      [
+        ...priorCarryoverResults,
+        {
+          cash_closing: computed.cash_closing,
+          stakeholder_score: finalStakeholder,
+          ld_triggered: computed.ld_triggered,
+          detail: computed.detail,
+        },
+      ],
+      [
+        ...priorCarryoverDecisions,
+        {
+          focus_speed: decision.focus_speed,
+          governance_intensity: decision.governance_intensity,
+          raw: decision.raw,
+        },
+      ]
+    );
 
     const finalResult: RoundResult = {
       ...computed,
@@ -319,6 +424,7 @@ export async function POST(request: NextRequest) {
           stakeholder_penalty: latePenalty.stakeholderPenalty,
           extension_mode: latePenalty.extensionMode,
         },
+        carryover_state: updatedCarryoverState,
       },
     };
 
@@ -335,6 +441,12 @@ export async function POST(request: NextRequest) {
       claim_entitlement_score: finalResult.claim_entitlement_score,
       points_earned: finalResult.points_earned,
       penalties: finalResult.penalties,
+      ld_triggered: finalResult.ld_triggered,
+      ld_amount_cr: finalResult.ld_amount_cr,
+      ld_cumulative_cr: finalResult.ld_cumulative_cr,
+      ld_weeks: finalResult.ld_weeks,
+      ld_capped: finalResult.ld_capped,
+      carryover_state: updatedCarryoverState,
       detail: finalResult.detail,
     };
 
@@ -359,7 +471,7 @@ export async function POST(request: NextRequest) {
 
     const { error: teamUpdateError } = await supabase
       .from("teams")
-      .update({ total_points: totalPoints })
+      .update({ total_points: totalPoints, total_ld_cr: finalResult.ld_cumulative_cr })
       .eq("id", teamId)
       .eq("session_id", sessionId);
 

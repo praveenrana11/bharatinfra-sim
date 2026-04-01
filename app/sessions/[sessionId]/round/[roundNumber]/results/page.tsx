@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
+import SiteProgressVisual from "@/components/SiteProgressVisual";
 import {
   MetricTile as ResultsMetricTile,
   PerformanceHistoryChart,
@@ -19,6 +20,8 @@ import { MetricTile as StatTile } from "@/components/ui/MetricTile";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { buildDeterministicRoundDebrief } from "@/lib/aiDebrief";
 import { generateCausalInsights } from "@/lib/causalDebrief";
+import { parseStoredDilemmaSummary } from "@/lib/dilemmaEngine";
+import { getScenarioFamily } from "@/lib/simVisuals";
 import { getSupabaseClient } from "@/lib/supabaseClient";
 import { evaluateKpiAchievement, parseKpiTarget } from "@/lib/kpi";
 import type { DecisionDraft, RoundResult } from "@/lib/simEngine";
@@ -44,6 +47,12 @@ type TeamRow = {
   team_name: string;
   total_points: number | null;
   kpi_target: string | null;
+  scenario_id: string | null;
+};
+
+type ScenarioRow = {
+  name: string | null;
+  duration_rounds: number | null;
 };
 
 type DecisionRow = {
@@ -71,6 +80,11 @@ type TeamResultRow = {
   claim_entitlement_score: number | null;
   points_earned: number | null;
   penalties: number | null;
+  ld_triggered: boolean | null;
+  ld_amount_cr: number | string | null;
+  ld_cumulative_cr: number | string | null;
+  ld_weeks: number | null;
+  ld_capped: boolean | null;
   detail: Record<string, unknown> | null;
 };
 
@@ -113,7 +127,19 @@ function formatCurrencyInr(value: number) {
 }
 
 function toNumber(value: unknown, fallback = 0) {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function formatCrores(value: number) {
+  return new Intl.NumberFormat("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
 }
 
 function metricValueFromResult(result: TeamResultRow | null, key: MetricKey) {
@@ -314,6 +340,7 @@ export default function RoundResultsPage() {
   const [error, setError] = useState("");
   const [session, setSession] = useState<SessionRow | null>(null);
   const [team, setTeam] = useState<TeamRow | null>(null);
+  const [scenario, setScenario] = useState<ScenarioRow | null>(null);
   const [decision, setDecision] = useState<DecisionRow | null>(null);
   const [teamHistory, setTeamHistory] = useState<TeamResultRow[]>([]);
   const [roundPoints, setRoundPoints] = useState<RoundPointsRow[]>([]);
@@ -369,7 +396,7 @@ export default function RoundResultsPage() {
 
       const { data: teamsData, error: teamError } = await supabase
         .from("teams")
-        .select("id,session_id,team_name,total_points,kpi_target")
+        .select("id,session_id,team_name,total_points,kpi_target,scenario_id")
         .in("id", teamIds)
         .eq("session_id", sessionId);
 
@@ -393,9 +420,9 @@ export default function RoundResultsPage() {
       }
 
       const teamResultSelect =
-        "session_id,team_id,round_number,schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,detail";
+        "session_id,team_id,round_number,schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,ld_triggered,ld_amount_cr,ld_cumulative_cr,ld_weeks,ld_capped,detail";
 
-      const [historyResponse, decisionResponse, roundPointsResponse] = await Promise.all([
+      const [historyResponse, decisionResponse, roundPointsResponse, scenarioResponse] = await Promise.all([
         supabase
           .from("team_results")
           .select(teamResultSelect)
@@ -416,6 +443,13 @@ export default function RoundResultsPage() {
           .select("team_id,round_number,points_earned")
           .eq("session_id", sessionId)
           .eq("round_number", roundNumber),
+        myTeam.scenario_id
+          ? supabase
+              .from("project_scenarios")
+              .select("name,duration_rounds")
+              .eq("id", myTeam.scenario_id)
+              .maybeSingle()
+          : Promise.resolve({ data: null, error: null }),
       ]);
 
       if (historyResponse.error) {
@@ -442,9 +476,18 @@ export default function RoundResultsPage() {
         return;
       }
 
+      if (scenarioResponse.error) {
+        if (!cancelled) {
+          setError(scenarioResponse.error.message);
+          setLoading(false);
+        }
+        return;
+      }
+
       if (!cancelled) {
         setSession((sessionResponse.data as SessionRow | null) ?? null);
         setTeam(myTeam);
+        setScenario((scenarioResponse.data as ScenarioRow | null) ?? null);
         setDecision((decisionResponse.data as DecisionRow | null) ?? null);
         setTeamHistory((historyResponse.data as TeamResultRow[] | null) ?? []);
         setRoundPoints((roundPointsResponse.data as RoundPointsRow[] | null) ?? []);
@@ -482,6 +525,16 @@ export default function RoundResultsPage() {
   const basePoints = Math.round(toNumber(resultDetail?.kpi?.base_points, pointsThisRound));
   const claimEntitlement = Math.round(toNumber(result?.claim_entitlement_score, 0));
   const totalTeamPoints = Math.round(team?.total_points ?? pointsThisRound);
+  const currentSpi = toNumber(result?.schedule_index, 0);
+  const ldTriggered = Boolean(result?.ld_triggered);
+  const ldAmountCr = toNumber(result?.ld_amount_cr, 0);
+  const ldCumulativeCr = toNumber(result?.ld_cumulative_cr, 0);
+  const ldCapped = Boolean(result?.ld_capped);
+  const ldCapCr = toNumber(resultDetail?.ld?.cap_cr, 0);
+  const ldRemainingCr = Math.max(0, ldCapCr - ldCumulativeCr);
+  const ldProgressPercent = ldCapCr > 0 ? clampPercent((ldCumulativeCr / ldCapCr) * 100) : 0;
+  const scenarioFamily = getScenarioFamily(scenario?.name);
+  const scenarioRounds = Math.max(scenario?.duration_rounds ?? 0, roundNumber, 1);
 
   const roundRank = useMemo(() => {
     if (!team) return null;
@@ -503,6 +556,11 @@ export default function RoundResultsPage() {
         claim_entitlement_score: toNumber(result.claim_entitlement_score, 0),
         points_earned: toNumber(result.points_earned, 0),
         penalties: toNumber(result.penalties, 0),
+        ld_triggered: Boolean(result.ld_triggered),
+        ld_amount_cr: toNumber(result.ld_amount_cr, 0),
+        ld_cumulative_cr: toNumber(result.ld_cumulative_cr, 0),
+        ld_weeks: toNumber(result.ld_weeks, 0),
+        ld_capped: Boolean(result.ld_capped),
         detail: result.detail ?? {},
       }
     : null;
@@ -517,6 +575,11 @@ export default function RoundResultsPage() {
         claim_entitlement_score: toNumber(previousResult.claim_entitlement_score, 0),
         points_earned: toNumber(previousResult.points_earned, 0),
         penalties: toNumber(previousResult.penalties, 0),
+        ld_triggered: Boolean(previousResult.ld_triggered),
+        ld_amount_cr: toNumber(previousResult.ld_amount_cr, 0),
+        ld_cumulative_cr: toNumber(previousResult.ld_cumulative_cr, 0),
+        ld_weeks: toNumber(previousResult.ld_weeks, 0),
+        ld_capped: Boolean(previousResult.ld_capped),
         detail: previousResult.detail ?? {},
       }
     : null;
@@ -532,6 +595,7 @@ export default function RoundResultsPage() {
         vendor_strategy: decision.vendor_strategy,
       }
     : null;
+  const dilemmaSummary = useMemo(() => parseStoredDilemmaSummary(decision?.raw ?? null), [decision?.raw]);
   const kpiTarget = parseKpiTarget(team?.kpi_target ?? null);
   const kpiEvaluation =
     kpiTarget && normalizedResult ? evaluateKpiAchievement(kpiTarget, normalizedResult) : null;
@@ -717,6 +781,124 @@ export default function RoundResultsPage() {
               </div>
 
               <Card className="border-white/10 bg-slate-900/70">
+                <CardHeader
+                  title="Site Progress Model"
+                  subtitle="BIM-inspired progress snapshot updated to this round's execution status"
+                />
+                <CardBody>
+                  <SiteProgressVisual
+                    scenarioType={scenarioFamily}
+                    currentRound={roundNumber}
+                    totalRounds={scenarioRounds}
+                    spi={toNumber(result?.schedule_index, 1)}
+                    safety={toNumber(result?.safety_score, 100)}
+                    hasIncident={toNumber(result?.safety_score, 100) < 75}
+                  />
+                </CardBody>
+              </Card>
+
+              {ldTriggered ? (
+                <Card
+                  className={
+                    ldCapped
+                      ? "border-emerald-500/30 bg-emerald-500/10"
+                      : "border-rose-500/30 bg-rose-500/10"
+                  }
+                >
+                  <CardHeader
+                    title="⚠️ Liquidated Damages Invoked"
+                    subtitle={`Schedule performance (SPI ${currentSpi.toFixed(2)}) fell below the 0.90 threshold. Client has invoked LD clause.`}
+                  />
+                  <CardBody className="space-y-5">
+                    <div
+                      className={`rounded-[24px] border px-4 py-4 text-sm font-semibold ${
+                        ldCapped
+                          ? "border-emerald-400/30 bg-emerald-500/15 text-emerald-100"
+                          : "border-rose-400/30 bg-rose-500/15 text-rose-100"
+                      }`}
+                    >
+                      {ldCapped
+                        ? "LD Cap Reached — no further deductions"
+                        : "LD is now carrying forward round to round until schedule performance recovers or the contract cap is exhausted."}
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-3">
+                      <div className="rounded-[24px] border border-white/10 bg-slate-950/70 px-4 py-4">
+                        <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">
+                          This round
+                        </div>
+                        <div className="mt-2 text-2xl font-black text-white">
+                          ₹{formatCrores(ldAmountCr)} Cr deducted
+                        </div>
+                      </div>
+                      <div className="rounded-[24px] border border-white/10 bg-slate-950/70 px-4 py-4">
+                        <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">
+                          Cumulative
+                        </div>
+                        <div className="mt-2 text-2xl font-black text-white">
+                          ₹{formatCrores(ldCumulativeCr)} Cr total LD to date
+                        </div>
+                      </div>
+                      <div className="rounded-[24px] border border-white/10 bg-slate-950/70 px-4 py-4">
+                        <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">
+                          Contract remaining
+                        </div>
+                        <div className="mt-2 text-2xl font-black text-white">
+                          ₹{formatCrores(ldRemainingCr)} Cr before cap
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3 rounded-[24px] border border-white/10 bg-slate-950/70 px-4 py-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="text-sm font-semibold text-white">LD exposure against cap</div>
+                        <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">
+                          {ldCapCr > 0 ? `${ldProgressPercent.toFixed(0)}% of ₹${formatCrores(ldCapCr)} Cr cap` : "Cap unavailable"}
+                        </div>
+                      </div>
+                      <div className="h-3 overflow-hidden rounded-full bg-slate-800">
+                        <div
+                          className={`h-full rounded-full transition-all ${
+                            ldCapped ? "bg-emerald-400" : "bg-rose-400"
+                          }`}
+                          style={{ width: `${ldProgressPercent}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="rounded-[24px] border border-white/10 bg-slate-950/70 px-4 py-4">
+                      <div className="text-sm font-black uppercase tracking-[0.18em] text-amber-200">
+                        DISPUTE OPTIONS (next round)
+                      </div>
+                      <div className="mt-4 grid gap-4 lg:grid-cols-3">
+                        <div className="rounded-[22px] border border-white/10 bg-slate-900/80 px-4 py-4">
+                          <div className="text-sm font-bold text-white">1. Accept LD</div>
+                          <div className="mt-2 text-sm text-slate-300">
+                            Absorb and focus on schedule recovery
+                          </div>
+                        </div>
+                        <div className="rounded-[22px] border border-white/10 bg-slate-900/80 px-4 py-4">
+                          <div className="text-sm font-bold text-white">2. Formal Dispute</div>
+                          <div className="mt-2 text-sm text-slate-300">
+                            Costs ₹15L legal fees, 40% success rate, takes 2 rounds to resolve
+                          </div>
+                        </div>
+                        <div className="rounded-[22px] border border-white/10 bg-slate-900/80 px-4 py-4">
+                          <div className="text-sm font-bold text-white">3. Negotiate Settlement</div>
+                          <div className="mt-2 text-sm text-slate-300">
+                            Offer 60% of LD amount as settlement, preserves relationship
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mt-4 text-sm text-slate-400">
+                        Your response to LD will be a decision in the next round
+                      </div>
+                    </div>
+                  </CardBody>
+                </Card>
+              ) : null}
+
+              <Card className="border-white/10 bg-slate-900/70">
                 <CardHeader title="Metrics Row" subtitle="Round health across schedule, cost, quality, safety, and stakeholder outcomes" />
                 <CardBody className="space-y-4">
                   <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
@@ -745,8 +927,23 @@ export default function RoundResultsPage() {
               </Card>
 
               <Card className="border-white/10 bg-slate-900/70">
-                <CardHeader title={"\u{1F50D} What Drove Your Score"} subtitle="Cause-and-effect signals from your decisions, score shifts, and round shocks" />
+                <CardHeader title="What Happened This Round" subtitle="Your management calls, score shifts, and round shocks in one debrief" />
                 <CardBody className="space-y-4">
+                  {dilemmaSummary?.selected.length ? (
+                    <div className="space-y-3">
+                      {dilemmaSummary.selected.map((selection) => (
+                        <div
+                          key={`${selection.dilemma_id}-${selection.option_id}`}
+                          className="rounded-[24px] border border-cyan-400/15 bg-cyan-400/8 px-4 py-4 text-sm text-cyan-50"
+                        >
+                          You chose <span className="font-bold text-white">{selection.option_label}</span> for{" "}
+                          <span className="font-bold text-white">{selection.dilemma_title}</span> {"->"}{" "}
+                          {selection.outcome_description}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
                   {visibleCausalInsights.length > 0 ? (
                     <div className="space-y-4">
                       {visibleCausalInsights.map((insight, index) => (

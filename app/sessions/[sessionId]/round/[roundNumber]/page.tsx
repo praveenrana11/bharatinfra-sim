@@ -5,10 +5,12 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
+import { CompetitorIntelFeed } from "@/components/CompetitorIntelFeed";
 import { formatStatus } from "@/lib/formatters";
 import { getSupabaseClient } from "@/lib/supabaseClient";
 import { scoreRoundSecureClient } from "@/lib/secureRoundScoring";
 import { setTeamKpiTargetSecureClient } from "@/lib/secureTeamKpi";
+import { cn } from "@/lib/cn";
 import {
   computeRoundResultV2,
   DecisionDraft,
@@ -21,8 +23,10 @@ import { Button } from "@/components/ui/Button";
 import { DecisionSlider } from "@/components/DecisionSlider";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { Tooltip } from "@/components/ui/Tooltip";
+import { ProjectInbox } from "@/components/ProjectInbox";
 import LockConfirmationModal, { type LockConfirmationSection } from "@/components/LockConfirmationModal";
 import RoundBriefingCard from "@/components/RoundBriefingCard";
+import TeamCoordPanel from "@/components/TeamCoordPanel";
 import {
   DecisionProfile,
   DEFAULT_DECISION_PROFILE,
@@ -45,9 +49,25 @@ import {
   MessageTone,
   BudgetBreakdown,
 } from "@/lib/decisionProfile";
-import { ConstructionEvent, getRoundConstructionEvents } from "@/lib/constructionNews";
+import { ConstructionEvent, resolveRoundConstructionEvents } from "@/lib/constructionNews";
 import { KPI_TARGET_OPTIONS, KpiTarget, parseKpiTarget } from "@/lib/kpi";
 import { parseConstructionEvents } from "@/lib/newsPayload";
+import {
+  buildDilemmaRoundSummary,
+  deriveManagementFields,
+  getCategoryLabel,
+  parseStoredDilemmaSummary,
+  selectDilemmasForRound,
+  type Dilemma,
+  type DilemmaOption,
+  type DilemmaSelectionMap,
+  type DilemmaRoundSummary,
+} from "@/lib/dilemmaEngine";
+import {
+  type CarryoverState,
+  DEFAULT_CARRYOVER_STATE,
+  parseCarryoverState,
+} from "@/lib/consequenceEngine";
 import {
   formatScenarioComplexity,
   getDecisionEventImageUrl,
@@ -55,6 +75,17 @@ import {
   getScenarioTypeLabel,
 } from "@/lib/simVisuals";
 import { getRoundEvents, GameEvent } from "@/lib/eventDeck";
+import { generateProjectInboxMessages, type InboxIdentityProfile, type InboxPreviousRound } from "@/lib/inboxEngine";
+import {
+  TEAM_MEMBER_ROLES,
+  TeamMemberRole,
+  formatRoleList,
+  getDecisionOwner,
+  getRoleLabel,
+  getRoleName,
+  getRoleOwnedAreas,
+  roleOwnsStep,
+} from "@/lib/rolePermissions";
 
 const externalContextOptions: Array<{ value: ExternalContext; icon: string; text: string }> = [
   { value: "Stable Environment", icon: getExternalContextIcon("Stable Environment"), text: "Stable environment" },
@@ -165,7 +196,7 @@ const vendorOptions: VendorStrategy[] = ["Cheapest", "Balanced", "Reliable"];
 
 const stepTitles = [
   "Context & Strategy",
-  "Market & Governance",
+  "Management Decisions",
   "People & Engineering",
   "Ops & Stakeholder",
   "Finance & Lock",
@@ -331,9 +362,11 @@ type RouteParams = {
 };
 
 type SessionRow = { round_count: number; current_round: number; created_by: string };
-type MembershipRow = { team_id: string };
+type MembershipRow = { team_id: string; member_role: TeamMemberRole | null };
 type TeamIdentityProfile = {
+  company_name?: string | null;
   positioning_strategy?: string | null;
+  primary_kpi?: string | null;
 };
 type TeamRow = {
   id: string;
@@ -356,6 +389,11 @@ type ExistingDecisionRow = DecisionDraft & {
   locked: boolean;
 };
 
+type PreviousRoundPerformanceRow = {
+  spi: number | null;
+  cpi: number | null;
+};
+
 type SessionRoundRow = {
   session_id?: string;
   round_number?: number | null;
@@ -369,6 +407,24 @@ type ScenarioPromotionRow = {
   source_scenario_name: string | null;
   promotion_payload: Record<string, unknown> | null;
   applied_at: string | null;
+};
+
+type TeamMembershipRoleRow = {
+  user_id: string;
+  team_role: string | null;
+  is_team_lead: boolean | null;
+  member_role: TeamMemberRole | null;
+};
+
+type TeamRoleAssignment = {
+  userId: string;
+  memberLabel: string;
+};
+
+type CoordinationStatus = {
+  draftSavedAt: string | null;
+  userId: string | null;
+  memberLabel: string | null;
 };
 
 type ForecastState = {
@@ -501,6 +557,260 @@ function StepContextBanner({ children }: { children: ReactNode }) {
   );
 }
 
+const dilemmaCategoryOwnership: Record<Dilemma["category"], TeamMemberRole> = {
+  procurement: "contracts_manager",
+  commercial: "contracts_manager",
+  client: "project_director",
+  regulatory: "project_director",
+  people: "hse_manager",
+};
+
+const ownedFormFields: Record<TeamMemberRole, Array<keyof ExtendedDecisionForm>> = {
+  project_director: ["external_context", "strategic_posture", "market_expansion"],
+  contracts_manager: [
+    "primary_sector",
+    "secondary_sector",
+    "project_mix_public_pct",
+    "subcontractor_profile",
+    "vendor_strategy",
+  ],
+  planning_manager: [
+    "focus_quality",
+    "focus_speed",
+    "self_perform_percent",
+    "pm_utilization_target",
+    "specialized_work_index",
+    "qa_audit_frequency",
+    "innovation_budget_index",
+    "logistics_resilience",
+    "buffer_percent",
+    "inventory_cover_weeks",
+  ],
+  hse_manager: [
+    "focus_stakeholder",
+    "work_life_balance_index",
+    "workforce_plan",
+    "workforce_load_state",
+    "training_intensity",
+    "overtime_policy",
+    "community_engagement",
+    "digital_visibility_spend",
+    "csr_sustainability_index",
+    "transparency_level",
+  ],
+  finance_head: [
+    "focus_cost",
+    "compliance_posture",
+    "facilitation_budget_index",
+    "financing_posture",
+    "cash_buffer_months",
+    "contingency_fund_percent",
+  ],
+};
+
+function formatMemberLabel(member: TeamMembershipRoleRow, currentUserId: string, fallbackName: string) {
+  if (member.user_id === currentUserId) return `${fallbackName} (You)`;
+  if (member.team_role?.trim()) return member.team_role.trim();
+  if (member.is_team_lead) return "Team Lead";
+  return "Team Member";
+}
+
+function parseCoordinationState(raw: Record<string, unknown> | null) {
+  const coordinationRaw = toRecord(raw?.team_coordination);
+  const roleStatusesRaw = toRecord(coordinationRaw?.role_statuses);
+
+  return TEAM_MEMBER_ROLES.reduce<Partial<Record<TeamMemberRole, CoordinationStatus>>>((accumulator, role) => {
+    const statusRaw = toRecord(roleStatusesRaw?.[role]);
+    accumulator[role] = {
+      draftSavedAt: typeof statusRaw?.draft_saved_at === "string" ? statusRaw.draft_saved_at : null,
+      userId: typeof statusRaw?.user_id === "string" ? statusRaw.user_id : null,
+      memberLabel: typeof statusRaw?.member_label === "string" ? statusRaw.member_label : null,
+    };
+    return accumulator;
+  }, {});
+}
+
+function applyRoleOwnedFields(
+  baseForm: ExtendedDecisionForm,
+  nextForm: ExtendedDecisionForm,
+  role: TeamMemberRole | null
+) {
+  if (!role) return baseForm;
+
+  const merged: ExtendedDecisionForm = { ...baseForm };
+  const mergedRecord = merged as Record<
+    keyof ExtendedDecisionForm,
+    ExtendedDecisionForm[keyof ExtendedDecisionForm]
+  >;
+  for (const field of ownedFormFields[role]) {
+    mergedRecord[field] = nextForm[field];
+  }
+  return merged;
+}
+
+function mergeDilemmaSelectionsByRole(
+  currentSelections: DilemmaSelectionMap,
+  latestSelections: DilemmaSelectionMap,
+  role: TeamMemberRole | null,
+  dilemmas: Dilemma[]
+) {
+  if (!role) return latestSelections;
+
+  const merged = { ...latestSelections };
+  for (const dilemma of dilemmas) {
+    if (dilemmaCategoryOwnership[dilemma.category] !== role) continue;
+    const nextSelection = currentSelections[dilemma.id];
+    if (nextSelection) {
+      merged[dilemma.id] = nextSelection;
+    } else {
+      delete merged[dilemma.id];
+    }
+  }
+  return merged;
+}
+
+function buildCoordinationPayload(
+  existingState: Partial<Record<TeamMemberRole, CoordinationStatus>>,
+  currentRole: TeamMemberRole | null,
+  assignments: Partial<Record<TeamMemberRole, TeamRoleAssignment>>,
+  userId: string,
+  savedAt: string | null
+) {
+  const nextState = { ...existingState };
+
+  for (const role of TEAM_MEMBER_ROLES) {
+    const assignment = assignments[role];
+    const previous = existingState[role];
+    nextState[role] = {
+      draftSavedAt: previous?.draftSavedAt ?? null,
+      userId: assignment?.userId ?? previous?.userId ?? null,
+      memberLabel: assignment?.memberLabel ?? previous?.memberLabel ?? null,
+    };
+  }
+
+  if (currentRole) {
+    nextState[currentRole] = {
+      draftSavedAt: savedAt,
+      userId,
+      memberLabel: assignments[currentRole]?.memberLabel ?? nextState[currentRole]?.memberLabel ?? null,
+    };
+  }
+
+  return nextState;
+}
+
+function serializeCoordinationState(state: Partial<Record<TeamMemberRole, CoordinationStatus>>) {
+  return {
+    role_statuses: Object.fromEntries(
+      TEAM_MEMBER_ROLES.map((role) => [
+        role,
+        {
+          draft_saved_at: state[role]?.draftSavedAt ?? null,
+          user_id: state[role]?.userId ?? null,
+          member_label: state[role]?.memberLabel ?? null,
+        },
+      ])
+    ),
+  };
+}
+
+function extractDecisionState(row: ExistingDecisionRow | null) {
+  if (!row) {
+    return {
+      form: defaultForm,
+      selectedDilemmaOptionIds: {} as DilemmaSelectionMap,
+      eventsChosen: {} as Record<string, string>,
+      forecast: DEFAULT_FORECAST,
+      coordinationState: {} as Partial<Record<TeamMemberRole, CoordinationStatus>>,
+      locked: false,
+    };
+  }
+
+  const parsedProfile = parseDecisionProfile(row.raw);
+  const storedDilemmaSummary = parseStoredDilemmaSummary(row.raw);
+  const warRoomV2 = toRecord(row.raw?.war_room_v2);
+
+  const selectedDilemmaOptionIds =
+    storedDilemmaSummary?.selected.reduce<DilemmaSelectionMap>((accumulator, selection) => {
+      accumulator[selection.dilemma_id] = selection.option_id;
+      return accumulator;
+    }, {}) ?? {};
+
+  const eventsChosen: Record<string, string> = {};
+  const storedEvents = Array.isArray(warRoomV2?.eventsChosen) ? warRoomV2.eventsChosen : [];
+  for (const entry of storedEvents) {
+    const eventRecord = toRecord(entry);
+    if (typeof eventRecord?.eventId === "string" && typeof eventRecord.choiceId === "string") {
+      eventsChosen[eventRecord.eventId] = eventRecord.choiceId;
+    }
+  }
+
+  const forecast = (() => {
+    const forecastRaw = toRecord(warRoomV2?.forecast);
+    if (!forecastRaw) return DEFAULT_FORECAST;
+    return {
+      predicted_schedule_index:
+        toNumberOrNull(forecastRaw.predicted_schedule_index) ?? DEFAULT_FORECAST.predicted_schedule_index,
+      predicted_cost_index:
+        toNumberOrNull(forecastRaw.predicted_cost_index) ?? DEFAULT_FORECAST.predicted_cost_index,
+      confidence: toNumberOrNull(forecastRaw.confidence) ?? DEFAULT_FORECAST.confidence,
+    };
+  })();
+
+  return {
+    form: {
+      ...defaultForm,
+      ...parsedProfile,
+      focus_cost: row.focus_cost,
+      focus_quality: row.focus_quality,
+      focus_stakeholder: row.focus_stakeholder,
+      focus_speed: row.focus_speed,
+      risk_appetite: row.risk_appetite,
+      governance_intensity: row.governance_intensity,
+      buffer_percent: row.buffer_percent,
+      vendor_strategy: row.vendor_strategy,
+    },
+    selectedDilemmaOptionIds,
+    eventsChosen,
+    forecast,
+    coordinationState: parseCoordinationState(row.raw),
+    locked: Boolean(row.locked),
+  };
+}
+
+function DecisionOwnershipGate({
+  decisionKey,
+  currentRole,
+  roleAssignments,
+  children,
+  className = "",
+}: {
+  decisionKey: string;
+  currentRole: TeamMemberRole | null;
+  roleAssignments: Partial<Record<TeamMemberRole, TeamRoleAssignment>>;
+  children: ReactNode;
+  className?: string;
+}) {
+  const ownerRole = getDecisionOwner(decisionKey);
+  const isOwned = ownerRole ? currentRole === ownerRole : true;
+  const ownerName = getRoleName(ownerRole);
+  const ownerMember = ownerRole ? roleAssignments[ownerRole]?.memberLabel ?? ownerName : "Shared";
+
+  return (
+    <div className={`relative ${className}`}>
+      <div className={!isOwned ? "pointer-events-none opacity-50 saturate-50" : ""}>{children}</div>
+      {!isOwned && ownerRole ? (
+        <div className="pointer-events-none absolute inset-0 flex items-start justify-between rounded-2xl border border-slate-600/70 bg-slate-950/35 px-3 py-3">
+          <div className="rounded-xl border border-slate-500/60 bg-slate-950/90 px-3 py-2 text-xs">
+            <div className="font-bold uppercase tracking-[0.18em] text-slate-200">Owned by: {ownerName}</div>
+            <div className="mt-1 text-slate-400">Request input from {ownerMember}.</div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function buildDecisionPersistencePayload(params: {
   sessionId: string;
   teamId: string;
@@ -514,6 +824,8 @@ function buildDecisionPersistencePayload(params: {
   deckEvents: GameEvent[];
   eventsChosen: Record<string, string>;
   forecast: ForecastState;
+  dilemmaSummary: DilemmaRoundSummary;
+  coordinationState: Partial<Record<TeamMemberRole, CoordinationStatus>>;
   locked: boolean;
   submittedAt: string | null;
 }) {
@@ -530,6 +842,8 @@ function buildDecisionPersistencePayload(params: {
     deckEvents,
     eventsChosen,
     forecast,
+    dilemmaSummary,
+    coordinationState,
     locked,
     submittedAt,
   } = params;
@@ -553,6 +867,8 @@ function buildDecisionPersistencePayload(params: {
         eventsChosen: Object.entries(eventsChosen).map(([eventId, choiceId]) => ({ eventId, choiceId })),
         forecast,
       },
+      management_dilemmas: dilemmaSummary,
+      team_coordination: serializeCoordinationState(coordinationState),
     },
     locked,
     submitted_at: submittedAt,
@@ -972,6 +1288,35 @@ function describeBidAggressiveness(value: number) {
   return "Conservative";
 }
 
+function riskBadgeTone(level: DilemmaOption["risk_level"]) {
+  if (level === "low") return "border-emerald-400/30 bg-emerald-500/15 text-emerald-100";
+  if (level === "medium") return "border-amber-400/30 bg-amber-500/15 text-amber-100";
+  return "border-rose-400/30 bg-rose-500/15 text-rose-100";
+}
+
+function formatImpactChip(label: string, value: number, decimals = 0) {
+  const roundedValue = decimals > 0 ? value.toFixed(decimals) : `${Math.round(value)}`;
+  const arrow = value >= 0 ? "Up" : "Down";
+  const sign = value > 0 ? "+" : "";
+  return `${arrow} ${label} ${sign}${roundedValue}`;
+}
+
+function buildImpactPreview(option: DilemmaOption) {
+  const candidates = [
+    { label: "SPI", value: option.impact.spi, decimals: 2 },
+    { label: "CPI", value: option.impact.cpi, decimals: 2 },
+    { label: "Safety", value: option.impact.safety, decimals: 0 },
+    { label: "Stakeholder", value: option.impact.stakeholder, decimals: 0 },
+    { label: "Cash", value: option.impact.cash, decimals: 0 },
+  ]
+    .filter((item) => Math.abs(item.value) > 0)
+    .sort((left, right) => Math.abs(right.value) - Math.abs(left.value))
+    .slice(0, 2);
+
+  if (candidates.length === 0) return "No material impact preview";
+  return candidates.map((item) => formatImpactChip(item.label, item.value, item.decimals)).join(" | ");
+}
+
 export default function RoundDecisionPage() {
   const params = useParams();
   const router = useRouter();
@@ -986,10 +1331,18 @@ export default function RoundDecisionPage() {
   const [userId, setUserId] = useState("");
   const [teamId, setTeamId] = useState("");
   const [teamName, setTeamName] = useState("");
+  const [companyName, setCompanyName] = useState("Project Team");
+  const [currentRole, setCurrentRole] = useState<TeamMemberRole | null>(null);
+  const [roleAssignments, setRoleAssignments] = useState<Partial<Record<TeamMemberRole, TeamRoleAssignment>>>({});
+  const [coordinationState, setCoordinationState] = useState<Partial<Record<TeamMemberRole, CoordinationStatus>>>({});
   const [sessionRoundCount, setSessionRoundCount] = useState(0);
   const [stepProjectContext, setStepProjectContext] = useState<StepProjectContext>(
     DEFAULT_STEP_PROJECT_CONTEXT
   );
+  const [identityProfile, setIdentityProfile] = useState<InboxIdentityProfile>({});
+  const [previousInboxSignals, setPreviousInboxSignals] = useState<InboxPreviousRound>({});
+  const [carryoverState, setCarryoverState] = useState<CarryoverState>(DEFAULT_CARRYOVER_STATE);
+  const [sharedRoundEvents, setSharedRoundEvents] = useState<ConstructionEvent[] | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [locked, setLocked] = useState(false);
@@ -1012,6 +1365,9 @@ export default function RoundDecisionPage() {
 
   const [activeStep, setActiveStep] = useState<StepIndex>(0);
   const [form, setForm] = useState<ExtendedDecisionForm>(defaultForm);
+  const [selectedDilemmaOptionIds, setSelectedDilemmaOptionIds] = useState<DilemmaSelectionMap>({});
+  const [previousRoundPerformance, setPreviousRoundPerformance] = useState<PreviousRoundPerformanceRow | null>(null);
+  const [showPortfolioContext, setShowPortfolioContext] = useState(false);
   const [teamKpiTarget, setTeamKpiTarget] = useState<KpiTarget | null>(null);
   const [draftKpiTarget, setDraftKpiTarget] = useState<KpiTarget | null>(null);
   const [savingKpiTarget, setSavingKpiTarget] = useState(false);
@@ -1027,20 +1383,84 @@ export default function RoundDecisionPage() {
   const stepStartRef = useRef<number>(Date.now());
   const activeStepRef = useRef<StepIndex>(0);
 
-  const roundEvents = useMemo(() => getRoundConstructionEvents(sessionId, roundNumber), [sessionId, roundNumber]);
+  const roundEvents = useMemo(
+    () =>
+      resolveRoundConstructionEvents({
+        sessionId,
+        roundNumber,
+        sharedEvents: sharedRoundEvents,
+        carryoverState,
+      }),
+    [carryoverState, roundNumber, sessionId, sharedRoundEvents]
+  );
   const [resolvedRoundEvents, setResolvedRoundEvents] = useState<ConstructionEvent[]>(roundEvents);
 
   const focusSum = form.focus_cost + form.focus_quality + form.focus_stakeholder + form.focus_speed;
   const kpiReady = roundNumber !== 1 || Boolean(teamKpiTarget || draftKpiTarget);
   const eventDeckReady = deckEvents.every((event) => Boolean(eventsChosen[event.id]));
   const profile = useMemo(() => extractProfile(form), [form]);
+  const roundDilemmas = useMemo<Dilemma[]>(
+    () =>
+      selectDilemmasForRound({
+        session_id: sessionId || "preview-session",
+        round_number: roundNumber,
+        scenario_type: stepProjectContext.scenarioType,
+        previous_round_performance: previousRoundPerformance,
+      }),
+    [previousRoundPerformance, roundNumber, sessionId, stepProjectContext.scenarioType]
+  );
+  const selectedDilemmaCount = useMemo(
+    () => roundDilemmas.filter((dilemma) => Boolean(selectedDilemmaOptionIds[dilemma.id])).length,
+    [roundDilemmas, selectedDilemmaOptionIds]
+  );
+  const derivedManagementFields = useMemo(
+    () => deriveManagementFields(roundDilemmas, selectedDilemmaOptionIds),
+    [roundDilemmas, selectedDilemmaOptionIds]
+  );
+  const dilemmaSummary = useMemo(
+    () => buildDilemmaRoundSummary(roundDilemmas, selectedDilemmaOptionIds, stepProjectContext.scenarioType, roundNumber),
+    [roundDilemmas, roundNumber, selectedDilemmaOptionIds, stepProjectContext.scenarioType]
+  );
   const budget: BudgetBreakdown = useMemo(() => estimateBudgetBreakdown(profile), [profile]);
   const totalRounds = Math.max(stepProjectContext.totalRounds, sessionRoundCount, roundNumber, 1);
   const roundsRemaining = Math.max(totalRounds - roundNumber, 0);
+  const isProjectDirector = currentRole === "project_director";
+  const ownedAreaLabels = getRoleOwnedAreas(currentRole);
+  const assignedOtherRoles = TEAM_MEMBER_ROLES.filter((role) => role !== currentRole && Boolean(roleAssignments[role]));
+  const coordinationReadyRoles = TEAM_MEMBER_ROLES.filter(
+    (role) => roleAssignments[role] && coordinationState[role]?.draftSavedAt
+  );
+  const allAssignedRolesReady =
+    Object.keys(roleAssignments).length > 0 &&
+    TEAM_MEMBER_ROLES.every((role) => !roleAssignments[role] || Boolean(coordinationState[role]?.draftSavedAt));
+  const coordinationWaitingRoles = TEAM_MEMBER_ROLES.filter(
+    (role) => roleAssignments[role] && !coordinationState[role]?.draftSavedAt
+  );
 
   useEffect(() => {
     setResolvedRoundEvents(roundEvents);
   }, [roundEvents]);
+
+  useEffect(() => {
+    setForm((previousForm) => {
+      if (
+        previousForm.bid_aggressiveness === derivedManagementFields.bid_aggressiveness &&
+        previousForm.risk_appetite === derivedManagementFields.risk_appetite &&
+        previousForm.governance_intensity === derivedManagementFields.governance_intensity &&
+        previousForm.public_message_tone === derivedManagementFields.public_message_tone
+      ) {
+        return previousForm;
+      }
+
+      return {
+        ...previousForm,
+        bid_aggressiveness: derivedManagementFields.bid_aggressiveness,
+        risk_appetite: derivedManagementFields.risk_appetite,
+        governance_intensity: derivedManagementFields.governance_intensity,
+        public_message_tone: derivedManagementFields.public_message_tone,
+      };
+    });
+  }, [derivedManagementFields]);
   const stepChecklists: Record<StepIndex, ChecklistItem[]> = {
     0: [
       {
@@ -1065,14 +1485,14 @@ export default function RoundDecisionPage() {
     ],
     1: [
       {
+        label: "All management dilemmas have a decision",
+        pass: selectedDilemmaCount === roundDilemmas.length,
+        remainingLabel: `Choose an option for all ${roundDilemmas.length} dilemma cards`,
+      },
+      {
         label: "Primary sector selected",
         pass: Boolean(form.primary_sector),
         remainingLabel: "Select primary sector",
-      },
-      {
-        label: "Bid aggressiveness stays in range",
-        pass: form.bid_aggressiveness >= 1 && form.bid_aggressiveness <= 5,
-        remainingLabel: "Set bid aggressiveness between 1 and 5",
       },
       {
         label: "Secondary sector does not duplicate the primary sector",
@@ -1168,6 +1588,11 @@ export default function RoundDecisionPage() {
       remainingLabel: "Select a primary sector and keep the secondary sector unique",
     },
     {
+      label: "Management dilemma choices completed",
+      pass: selectedDilemmaCount === roundDilemmas.length,
+      remainingLabel: `Commit all ${roundDilemmas.length} management decisions`,
+    },
+    {
       label: "Expansion not overloaded by workforce",
       pass:
         form.market_expansion === "Consolidate Existing Regions" ||
@@ -1217,6 +1642,11 @@ export default function RoundDecisionPage() {
   function update<K extends keyof ExtendedDecisionForm>(key: K, value: ExtendedDecisionForm[K]) {
     setHasUnsavedChanges(true);
     setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function updateDilemmaChoice(dilemmaId: string, optionId: string) {
+    setHasUnsavedChanges(true);
+    setSelectedDilemmaOptionIds((previousChoices) => ({ ...previousChoices, [dilemmaId]: optionId }));
   }
 
   function updateEventChoice(eventId: string, choiceId: string) {
@@ -1294,6 +1724,12 @@ export default function RoundDecisionPage() {
 
   async function ensureTeamKpiTarget(requireForRoundOne: boolean): Promise<KpiTarget | null> {
     if (teamKpiTarget) return teamKpiTarget;
+    if (!isProjectDirector) {
+      if (requireForRoundOne && roundNumber === 1) {
+        throw new Error("Only the Project Director can set the team KPI target in Step 1.");
+      }
+      return teamKpiTarget;
+    }
 
     const selected = draftKpiTarget;
     if (!selected) {
@@ -1340,8 +1776,35 @@ export default function RoundDecisionPage() {
     return computeRoundResultV2(buildCoreDecision(form), seed, {
       profile,
       events: resolvedRoundEvents,
+      carryoverState,
     });
-  }, [form, profile, resolvedRoundEvents, roundNumber, sessionId, teamId]);
+  }, [carryoverState, form, profile, resolvedRoundEvents, roundNumber, sessionId, teamId]);
+  const inboxMessages = useMemo(
+    () =>
+      generateProjectInboxMessages({
+        sessionId,
+        roundNumber,
+        clientName: stepProjectContext.client,
+        companyName,
+        identityProfile: {
+          ...identityProfile,
+          company_name: companyName,
+          scenario_name: stepProjectContext.projectName,
+        },
+        previousRound: previousInboxSignals,
+        carryoverState,
+      }),
+    [
+      carryoverState,
+      companyName,
+      identityProfile,
+      previousInboxSignals,
+      roundNumber,
+      sessionId,
+      stepProjectContext.client,
+      stepProjectContext.projectName,
+    ]
+  );
 
   const msLeft = roundDeadlineIso ? Date.parse(roundDeadlineIso) - clockNow : null;
   const lockWindowExpired = msLeft !== null && msLeft <= 0;
@@ -1424,7 +1887,7 @@ export default function RoundDecisionPage() {
           setRoundClockSource("shared");
           setRoundStatus("pending");
           setRoundDeadlineIso(null);
-          setResolvedRoundEvents(roundEvents);
+          setSharedRoundEvents(null);
           setError((prev) => (prev === "Round is closed by facilitator." ? "" : prev));
         }
         return;
@@ -1438,7 +1901,7 @@ export default function RoundDecisionPage() {
         setRoundStatus(sharedRoundStatus);
         if (sharedRoundStatus === "closed") setError((prev) => prev || "Round is closed by facilitator.");
         if (sharedRoundStatus !== "closed") setError((prev) => (prev === "Round is closed by facilitator." ? "" : prev));
-        setResolvedRoundEvents(parseRoundEventsPayload(row.news_payload) ?? roundEvents);
+        setSharedRoundEvents(parseRoundEventsPayload(row.news_payload));
       }
     };
 
@@ -1505,7 +1968,7 @@ export default function RoundDecisionPage() {
       window.clearInterval(intervalId);
       void supabase.removeChannel(roundChannel);
     };
-  }, [roundNumber, roundEvents, sessionId, supabase, teamId, userId]);
+  }, [roundNumber, sessionId, supabase, teamId, userId]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -1553,7 +2016,14 @@ export default function RoundDecisionPage() {
       activeStepRef.current = 0;
       stepStartRef.current = Date.now();
       setActiveStep(0);
+      setCurrentRole(null);
+      setRoleAssignments({});
+      setCoordinationState({});
       setStepProjectContext(DEFAULT_STEP_PROJECT_CONTEXT);
+      setSelectedDilemmaOptionIds({});
+      setPreviousRoundPerformance(null);
+      setCarryoverState(DEFAULT_CARRYOVER_STATE);
+      setSharedRoundEvents(null);
 
       const { data: userData } = await supabase.auth.getUser();
       const user = userData.user;
@@ -1586,7 +2056,7 @@ export default function RoundDecisionPage() {
 
       const { data: membershipsData, error: mErr } = await supabase
         .from("team_memberships")
-        .select("team_id")
+        .select("team_id,member_role")
         .eq("user_id", user.id);
 
       if (mErr) {
@@ -1618,16 +2088,49 @@ export default function RoundDecisionPage() {
       }
 
       const myTeam = teams[0];
+      const viewerMembership = memberships.find((membership) => membership.team_id === myTeam.id) ?? null;
       setTeamId(myTeam.id);
       setTeamName(myTeam.team_name);
+      setCompanyName(myTeam.identity_profile?.company_name?.trim() || myTeam.team_name || "Project Team");
+      setCurrentRole(viewerMembership?.member_role ?? null);
       const parsedKpi = parseKpiTarget(myTeam.kpi_target);
       setTeamKpiTarget(parsedKpi);
       setDraftKpiTarget(parsedKpi);
+
+      const { data: teamMembershipRows, error: teamMembershipErr } = await supabase
+        .from("team_memberships")
+        .select("user_id,team_role,is_team_lead,member_role")
+        .eq("team_id", myTeam.id);
+
+      if (teamMembershipErr) {
+        setError(teamMembershipErr.message);
+        setLoading(false);
+        return;
+      }
+
+      const viewerLabel =
+        (typeof user.user_metadata?.full_name === "string" && user.user_metadata.full_name) ||
+        (typeof user.user_metadata?.name === "string" && user.user_metadata.name) ||
+        user.email?.split("@")[0] ||
+        "You";
+
+      const assignments = ((teamMembershipRows ?? []) as TeamMembershipRoleRow[]).reduce<
+        Partial<Record<TeamMemberRole, TeamRoleAssignment>>
+      >((accumulator, member) => {
+        if (!member.member_role) return accumulator;
+        accumulator[member.member_role] = {
+          userId: member.user_id,
+          memberLabel: formatMemberLabel(member, user.id, viewerLabel),
+        };
+        return accumulator;
+      }, {});
+      setRoleAssignments(assignments);
 
       const identityProfile =
         myTeam.identity_profile && typeof myTeam.identity_profile === "object"
           ? myTeam.identity_profile
           : {};
+      setIdentityProfile(identityProfile);
       const positioningStrategy = toText(identityProfile.positioning_strategy, "Not selected");
       let nextProjectContext: StepProjectContext = {
         ...DEFAULT_STEP_PROJECT_CONTEXT,
@@ -1658,6 +2161,46 @@ export default function RoundDecisionPage() {
 
       setStepProjectContext(nextProjectContext);
 
+      if (roundNumber > 1) {
+        const { data: previousResultData, error: previousResultError } = await supabase
+          .from("team_results")
+          .select("schedule_index,cost_index,safety_score,stakeholder_score,ld_triggered,carryover_state")
+          .eq("session_id", sessionId)
+          .eq("team_id", myTeam.id)
+          .eq("round_number", roundNumber - 1)
+          .maybeSingle();
+
+        if (previousResultError) {
+          setError(previousResultError.message);
+          setLoading(false);
+          return;
+        }
+
+        const previousResult =
+          previousResultData && typeof previousResultData === "object"
+            ? (previousResultData as Record<string, unknown>)
+            : null;
+
+        setPreviousRoundPerformance({
+          spi: typeof previousResult?.schedule_index === "number" ? previousResult.schedule_index : null,
+          cpi: typeof previousResult?.cost_index === "number" ? previousResult.cost_index : null,
+        });
+
+        setPreviousInboxSignals({
+          spi: toNumberOrNull(previousResult?.schedule_index),
+          cpi: toNumberOrNull(previousResult?.cost_index),
+          safety: toNumberOrNull(previousResult?.safety_score),
+          stakeholder: toNumberOrNull(previousResult?.stakeholder_score),
+          ld_triggered:
+            typeof previousResult?.ld_triggered === "boolean" ? previousResult.ld_triggered : false,
+        });
+        setCarryoverState(parseCarryoverState(previousResult?.carryover_state));
+      } else {
+        setPreviousInboxSignals({});
+        setPreviousRoundPerformance(null);
+        setCarryoverState(DEFAULT_CARRYOVER_STATE);
+      }
+
       const { data: existingData, error: dErr } = await supabase
         .from("decisions")
         .select(
@@ -1676,31 +2219,17 @@ export default function RoundDecisionPage() {
 
       const existing = existingData as ExistingDecisionRow | null;
       if (existing) {
-        const parsedProfile = parseDecisionProfile(existing.raw);
+        const extractedState = extractDecisionState(existing);
 
-        setForm({
-          ...defaultForm,
-          ...parsedProfile,
-          focus_cost: existing.focus_cost,
-          focus_quality: existing.focus_quality,
-          focus_stakeholder: existing.focus_stakeholder,
-          focus_speed: existing.focus_speed,
-          risk_appetite: existing.risk_appetite,
-          governance_intensity: existing.governance_intensity,
-          buffer_percent: existing.buffer_percent,
-          vendor_strategy: existing.vendor_strategy,
-        });
+        setForm(extractedState.form);
+        setSelectedDilemmaOptionIds(extractedState.selectedDilemmaOptionIds);
+        setEventsChosen(extractedState.eventsChosen);
+        setForecast(extractedState.forecast);
+        setCoordinationState(extractedState.coordinationState);
 
-        const warRoomV2 = existing.raw?.war_room_v2 as any;
-        if (warRoomV2 && Array.isArray(warRoomV2.eventsChosen)) {
-          const initChosen: Record<string, string> = {};
-          warRoomV2.eventsChosen.forEach((ec: any) => {
-            if (ec.eventId && ec.choiceId) initChosen[ec.eventId] = ec.choiceId;
-          });
-          setEventsChosen(initChosen);
-        }
-        if (warRoomV2?.forecast) {
-          setForecast(warRoomV2.forecast);
+        const storedEvents = parseConstructionEvents(existing.raw?.events);
+        if (storedEvents && storedEvents.length > 0) {
+          setResolvedRoundEvents(storedEvents);
         }
 
         const savedStepRaw = (existing.raw as { active_step?: unknown } | null)?.active_step;
@@ -1712,12 +2241,16 @@ export default function RoundDecisionPage() {
         setActiveStep(savedStep);
         activeStepRef.current = savedStep;
         stepStartRef.current = Date.now();
-        setLocked(Boolean(existing.locked));
+        setLocked(extractedState.locked);
         setPromotionNotice("");
         setPromotionWarning("");
       } else {
         setLocked(false);
         setForm(defaultForm);
+        setSelectedDilemmaOptionIds({});
+        setEventsChosen({});
+        setForecast(DEFAULT_FORECAST);
+        setCoordinationState({});
         setPromotionNotice("");
         setPromotionWarning("");
 
@@ -1787,22 +2320,65 @@ export default function RoundDecisionPage() {
 
     try {
       if (!teamId) throw new Error("Team not loaded yet.");
+      if (!currentRole) throw new Error("Your specialist role is not assigned yet. Complete identity setup first.");
       await ensureTeamKpiTarget(false);
+
+      const { data: latestDecisionData, error: latestDecisionError } = await supabase
+        .from("decisions")
+        .select(
+          "focus_cost,focus_quality,focus_stakeholder,focus_speed,risk_appetite,governance_intensity,buffer_percent,vendor_strategy,locked,raw"
+        )
+        .eq("session_id", sessionId)
+        .eq("team_id", teamId)
+        .eq("round_number", roundNumber)
+        .maybeSingle();
+
+      if (latestDecisionError) throw latestDecisionError;
+
+      const latestState = extractDecisionState((latestDecisionData as ExistingDecisionRow | null) ?? null);
+      const mergedForm = applyRoleOwnedFields(latestState.form, form, currentRole);
+      const mergedDilemmaSelections = mergeDilemmaSelectionsByRole(
+        selectedDilemmaOptionIds,
+        latestState.selectedDilemmaOptionIds,
+        currentRole,
+        roundDilemmas
+      );
+      const mergedEventsChosen = currentRole === "project_director" ? eventsChosen : latestState.eventsChosen;
+      const mergedForecast = currentRole === "finance_head" ? forecast : latestState.forecast;
+      const savedAt = new Date().toISOString();
+      const mergedCoordinationState = buildCoordinationPayload(
+        latestState.coordinationState,
+        currentRole,
+        roleAssignments,
+        userId,
+        savedAt
+      );
+      const mergedDilemmaSummary = buildDilemmaRoundSummary(
+        roundDilemmas,
+        mergedDilemmaSelections,
+        stepProjectContext.scenarioType,
+        roundNumber
+      );
+      const mergedBudget = estimateBudgetBreakdown(extractProfile(mergedForm));
+      const mergedFocusSum =
+        mergedForm.focus_cost + mergedForm.focus_quality + mergedForm.focus_stakeholder + mergedForm.focus_speed;
 
       const { error: upErr } = await supabase.from("decisions").upsert(
         buildDecisionPersistencePayload({
           sessionId,
           teamId,
           roundNumber,
-          form,
+          form: mergedForm,
           activeStep,
-          focusSum,
+          focusSum: mergedFocusSum,
           readinessScore,
-          budget,
+          budget: mergedBudget,
           resolvedRoundEvents,
           deckEvents,
-          eventsChosen,
-          forecast,
+          eventsChosen: mergedEventsChosen,
+          forecast: mergedForecast,
+          dilemmaSummary: mergedDilemmaSummary,
+          coordinationState: mergedCoordinationState,
           locked: false,
           submittedAt: null,
         }),
@@ -1814,6 +2390,11 @@ export default function RoundDecisionPage() {
       const timingSnapshot = buildStepTimingSnapshot();
       setStepDurationsMs(timingSnapshot);
       setHasUnsavedChanges(false);
+      setForm(mergedForm);
+      setSelectedDilemmaOptionIds(mergedDilemmaSelections);
+      setEventsChosen(mergedEventsChosen);
+      setForecast(mergedForecast);
+      setCoordinationState(mergedCoordinationState);
 
       void trackTelemetry("decision_draft_saved", {
         active_step: activeStep,
@@ -1837,30 +2418,79 @@ export default function RoundDecisionPage() {
 
     try {
       if (!teamId) throw new Error("Team not loaded yet.");
+      if (!isProjectDirector) throw new Error("Only the Project Director can lock and generate results.");
+      if (!currentRole) throw new Error("Your specialist role is not assigned yet. Complete identity setup first.");
+      if (!allAssignedRolesReady) {
+        throw new Error(
+          coordinationWaitingRoles.length > 0
+            ? `Waiting on draft saves from ${formatRoleList(coordinationWaitingRoles)} before final lock.`
+            : "Every assigned specialist must save a draft before the Project Director can lock."
+        );
+      }
       if (roundClockSource === "shared" && lockWindowExpired) {
         throw new Error("Round deadline has passed. Wait for facilitator to close and auto-lock.");
       }
-      if (focusSum !== 100) throw new Error(`Focus must total 100 (current: ${focusSum}).`);
-
       await ensureTeamKpiTarget(true);
+
+      const { data: latestDecisionData, error: latestDecisionError } = await supabase
+        .from("decisions")
+        .select(
+          "focus_cost,focus_quality,focus_stakeholder,focus_speed,risk_appetite,governance_intensity,buffer_percent,vendor_strategy,locked,raw"
+        )
+        .eq("session_id", sessionId)
+        .eq("team_id", teamId)
+        .eq("round_number", roundNumber)
+        .maybeSingle();
+
+      if (latestDecisionError) throw latestDecisionError;
+
+      const latestState = extractDecisionState((latestDecisionData as ExistingDecisionRow | null) ?? null);
+      const mergedForm = applyRoleOwnedFields(latestState.form, form, currentRole);
+      const mergedDilemmaSelections = mergeDilemmaSelectionsByRole(
+        selectedDilemmaOptionIds,
+        latestState.selectedDilemmaOptionIds,
+        currentRole,
+        roundDilemmas
+      );
+      const mergedEventsChosen = eventsChosen;
+      const mergedForecast = latestState.forecast;
+      const mergedFocusSum =
+        mergedForm.focus_cost + mergedForm.focus_quality + mergedForm.focus_stakeholder + mergedForm.focus_speed;
+      if (mergedFocusSum !== 100) throw new Error(`Focus must total 100 (current: ${mergedFocusSum}).`);
 
       const submittedAt = new Date().toISOString();
       const latePenaltyPreview = computeLatePenalty(roundDeadlineIso, submittedAt, roundClockSource);
+      const mergedCoordinationState = buildCoordinationPayload(
+        latestState.coordinationState,
+        currentRole,
+        roleAssignments,
+        userId,
+        submittedAt
+      );
+      const mergedDilemmaSummary = buildDilemmaRoundSummary(
+        roundDilemmas,
+        mergedDilemmaSelections,
+        stepProjectContext.scenarioType,
+        roundNumber
+      );
+      const mergedBudget = estimateBudgetBreakdown(extractProfile(mergedForm));
 
       const { error: lockErr } = await supabase.from("decisions").upsert(
         buildDecisionPersistencePayload({
           sessionId,
           teamId,
           roundNumber,
-          form,
+          form: mergedForm,
           activeStep,
-          focusSum,
+          focusSum: mergedFocusSum,
           readinessScore,
-          budget,
+          budget: mergedBudget,
           resolvedRoundEvents,
           deckEvents,
-          eventsChosen,
-          forecast,
+          eventsChosen: mergedEventsChosen,
+          forecast: mergedForecast,
+          dilemmaSummary: mergedDilemmaSummary,
+          coordinationState: mergedCoordinationState,
           locked: true,
           submittedAt,
         }),
@@ -1936,6 +2566,9 @@ export default function RoundDecisionPage() {
       const finalTimingSnapshot = buildStepTimingSnapshot();
       setStepDurationsMs(finalTimingSnapshot);
       setHasUnsavedChanges(false);
+      setForm(mergedForm);
+      setSelectedDilemmaOptionIds(mergedDilemmaSelections);
+      setCoordinationState(mergedCoordinationState);
 
       void trackTelemetry("decision_locked", {
         active_step: activeStep,
@@ -1964,6 +2597,18 @@ export default function RoundDecisionPage() {
   }
 
   const openLockConfirmation = () => {
+    if (!isProjectDirector) {
+      setError("Only the Project Director can lock and generate results.");
+      return;
+    }
+    if (!allAssignedRolesReady) {
+      setError(
+        coordinationWaitingRoles.length > 0
+          ? `Waiting on draft saves from ${formatRoleList(coordinationWaitingRoles)} before final lock.`
+          : "Every assigned specialist must save a draft before the Project Director can lock."
+      );
+      return;
+    }
     setError("");
     setShowLockConfirmation(true);
   };
@@ -2036,22 +2681,27 @@ export default function RoundDecisionPage() {
         ],
       },
       {
-        title: "Step 2 - Market & Governance",
+        title: "Step 2 - Management Decisions",
         items: [
           {
-            label: "Sector & Strategy",
+            label: "Dilemma Choices",
+            value:
+              dilemmaSummary.selected.length > 0
+                ? dilemmaSummary.selected
+                    .map((selection) => `${selection.dilemma_title}: ${selection.option_label}`)
+                    .join(" | ")
+                : "No dilemma decisions selected yet",
+          },
+          {
+            label: "Derived Management Posture",
+            value: `${describeBidAggressiveness(form.bid_aggressiveness)} bidding, ${form.risk_appetite.toLowerCase()} risk appetite, ${form.governance_intensity.toLowerCase()} governance, and a ${form.public_message_tone.toLowerCase()} tone`,
+          },
+          {
+            label: "Portfolio Context",
             value:
               form.secondary_sector === "None"
-                ? `${form.primary_sector} as the sole delivery focus`
-                : `${form.primary_sector} primary with ${form.secondary_sector} as the secondary sector`,
-          },
-          {
-            label: "Risk & Governance",
-            value: `${form.risk_appetite} risk appetite with ${form.governance_intensity} governance and ${form.vendor_strategy.toLowerCase()} vendor strategy`,
-          },
-          {
-            label: "Key Sliders",
-            value: `Public mix: ${describeScaleLevel(form.project_mix_public_pct)} (${form.project_mix_public_pct}/100), Bid aggressiveness: ${describeBidAggressiveness(form.bid_aggressiveness)} (${form.bid_aggressiveness}/5), Buffer: ${describeScaleLevel(form.buffer_percent, 15)} (${form.buffer_percent}/15)`,
+                ? `${form.primary_sector} focus with ${form.project_mix_public_pct}% public exposure and ${form.market_expansion.toLowerCase()}`
+                : `${form.primary_sector} primary, ${form.secondary_sector} secondary, ${form.project_mix_public_pct}% public exposure, ${form.market_expansion.toLowerCase()}`,
           },
         ],
       },
@@ -2113,6 +2763,7 @@ export default function RoundDecisionPage() {
       forecast.confidence,
       forecast.predicted_cost_index,
       forecast.predicted_schedule_index,
+      dilemmaSummary.selected,
       form,
       subcontractShare,
     ]
@@ -2190,6 +2841,10 @@ export default function RoundDecisionPage() {
       : roundStatus === "pending"
         ? "Facilitator has not opened this round yet."
         : `${formatStatus(roundStatus)}. Awaiting next step.`;
+  const coordinationWaitingMessage =
+    coordinationWaitingRoles.length > 0
+      ? `Waiting on ${formatRoleList(coordinationWaitingRoles)} to save their specialist drafts.`
+      : "Waiting for the team to complete role assignments.";
 
   return (
     <RequireAuth>
@@ -2234,18 +2889,26 @@ export default function RoundDecisionPage() {
                 <span>Readiness: {readinessScore}%</span>
               </div>
             </div>
-            <div className="flex flex-col items-end">
-              <span className="text-slate-500 uppercase tracking-widest text-[9px]">Time Remaining</span>
-              <span className={`font-bold text-lg font-mono leading-none ${lockWindowExpired ? "text-rose-400" : "text-emerald-400"}`}>
-                {timeRemainingLabel}
-              </span>
-              <span
-                className={`mt-1 max-w-[260px] text-right text-[10px] font-semibold uppercase tracking-wide ${
-                  lockWindowExpired ? "text-rose-300" : "text-slate-400"
-                }`}
-              >
-                {headerStatusMessage}
-              </span>
+            <div className="flex flex-col gap-3 md:flex-row md:items-center">
+              <ProjectInbox
+                sessionId={sessionId}
+                roundNumber={roundNumber}
+                companyName={companyName}
+                messages={inboxMessages}
+              />
+              <div className="flex flex-col items-end">
+                <span className="text-slate-500 uppercase tracking-widest text-[9px]">Time Remaining</span>
+                <span className={`font-bold text-lg font-mono leading-none ${lockWindowExpired ? "text-rose-400" : "text-emerald-400"}`}>
+                  {timeRemainingLabel}
+                </span>
+                <span
+                  className={`mt-1 max-w-[260px] text-right text-[10px] font-semibold uppercase tracking-wide ${
+                    lockWindowExpired ? "text-rose-300" : "text-slate-400"
+                  }`}
+                >
+                  {headerStatusMessage}
+                </span>
+              </div>
             </div>
           </div>
         </header>
@@ -2282,17 +2945,49 @@ export default function RoundDecisionPage() {
           ) : (
              <>
                 <RoundBriefingCard sessionId={sessionId} roundNumber={roundNumber} teamId={teamId} />
+                <section className="rounded-[28px] border border-white/10 bg-[linear-gradient(135deg,rgba(13,148,136,0.16),rgba(15,23,42,0.92))] px-5 py-5 shadow-[0_18px_45px_rgba(2,6,23,0.24)]">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-teal-300">Role Indicator</div>
+                  <div className="mt-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div className="text-sm text-slate-200">
+                      <span className="font-bold text-white">You are: {getRoleName(currentRole)}</span>
+                      <span className="mx-2 text-slate-500">|</span>
+                      <span>
+                        You own: {ownedAreaLabels.length > 0 ? ownedAreaLabels.join(", ") : "No specialist areas assigned yet"}
+                      </span>
+                    </div>
+                    <div className="rounded-full border border-white/10 bg-slate-950/60 px-4 py-2 text-xs font-semibold text-slate-300">
+                      {currentRole ? getRoleLabel(currentRole) : "Complete identity setup to unlock ownership"}
+                    </div>
+                  </div>
+                  <div className="mt-3 text-sm text-slate-300">
+                    {assignedOtherRoles.length > 0
+                      ? `Coordinate with your ${formatRoleList(assignedOtherRoles)} before locking.`
+                      : "Coordinate with the rest of the team before locking."}
+                  </div>
+                </section>
+                <TeamCoordPanel
+                  currentRole={currentRole}
+                  assignments={roleAssignments}
+                  statuses={coordinationState}
+                  allRolesReady={allAssignedRolesReady}
+                  canProjectDirectorLock={isProjectDirector && allAssignedRolesReady && !isLocked && !saving}
+                  isLocked={locked}
+                  locking={locking}
+                  waitingMessage={coordinationWaitingMessage}
+                  onLock={openLockConfirmation}
+                />
                 <div className="rounded-2xl border border-white/5 bg-slate-950/70 px-4 py-4 md:flex md:items-center md:justify-between md:gap-4 lg:hidden">
                   <div className="flex items-center gap-2">
                     {stepTitles.map((title, index) => {
                       const idx = index as StepIndex;
                       const current = activeStep === idx;
                       const complete = idx < activeStep || stepValidations[idx];
+                      const ownsStep = roleOwnsStep(currentRole, idx + 1);
                       return (
                         <div
                           key={`tablet-step-${title}`}
                           className={`h-2.5 w-8 rounded-full transition-all ${
-                            current ? "bg-blue-500" : complete ? "bg-emerald-500/80" : "bg-slate-800"
+                            current ? (ownsStep ? "bg-teal-400" : "bg-slate-500") : complete ? (ownsStep ? "bg-teal-700" : "bg-slate-700") : ownsStep ? "bg-teal-950" : "bg-slate-800"
                           }`}
                           aria-hidden="true"
                         />
@@ -2320,12 +3015,19 @@ export default function RoundDecisionPage() {
                         {stepTitles.map((title, index) => {
                           const idx = index as StepIndex;
                           const current = activeStep === idx;
+                          const ownsStep = roleOwnsStep(currentRole, idx + 1);
                           return (
                             <button
                               key={title}
                               onClick={() => requestStepNavigation(idx, "stepper-tab")}
                               className={`px-5 py-2.5 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-all ${
-                                current ? "bg-blue-600 text-white shadow-lg shadow-blue-500/20 border border-white/10" : "bg-slate-900/50 text-slate-400 border border-transparent hover:bg-slate-800"
+                                current
+                                  ? ownsStep
+                                    ? "border border-teal-300/30 bg-teal-500/15 text-white shadow-lg shadow-teal-500/10"
+                                    : "border border-white/10 bg-slate-800 text-slate-200 shadow-lg shadow-slate-950/20"
+                                  : ownsStep
+                                    ? "border border-teal-900/50 bg-slate-900/50 text-teal-200 hover:border-teal-700 hover:bg-slate-800"
+                                    : "border border-transparent bg-slate-900/50 text-slate-500 hover:bg-slate-800"
                               }`}
                             >
                               {String(index+1).padStart(2,"0")} <span className="opacity-50 mx-1">/</span> {title}
@@ -2341,24 +3043,27 @@ export default function RoundDecisionPage() {
                         <StepContextBanner>
                           {`📍 ${stepProjectContext.projectName} | ${stepProjectContext.client} | Round ${roundNumber} of ${totalRounds}`}
                         </StepContextBanner>
-                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Team KPI Target (4x points)</div>
-                          {teamKpiTarget ? (
-                            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-400 font-bold shadow-inner flex justify-between items-center">
-                              <span>LOCKED TARGET // {teamKpiTarget}</span>
-                              {savingKpiTarget && <span className="text-emerald-400 animate-pulse text-xs">SAVING...</span>}
-                            </div>
-                          ) : roundNumber === 1 ? (
-                            <div className="space-y-4">
-                              <SegmentedControl options={KPI_TARGET_OPTIONS.map(k=>({value:k.value,text:k.value,hint:k.thresholdLabel}))} activeOption={draftKpiTarget} onSelect={(value) => setDraftKpiTarget(value)} disabled={isLocked} />
-                              <div className="pt-2"><Button variant="secondary" onClick={saveKpiTargetNow} disabled={isLocked || !draftKpiTarget || savingKpiTarget}>{savingKpiTarget ? "SAVING..." : "LOCK KPI TARGET"}</Button></div>
-                            </div>
-                          ) : (
-                            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400 shadow-inner">KPI TARGET NOT SET IN R1</div>
-                          )}
+                          <DecisionOwnershipGate decisionKey="team_kpi_target" currentRole={currentRole} roleAssignments={roleAssignments}>
+                            {teamKpiTarget ? (
+                              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-400 font-bold shadow-inner flex justify-between items-center">
+                                <span>LOCKED TARGET // {teamKpiTarget}</span>
+                                {savingKpiTarget && <span className="text-emerald-400 animate-pulse text-xs">SAVING...</span>}
+                              </div>
+                            ) : roundNumber === 1 ? (
+                              <div className="space-y-4">
+                                <SegmentedControl options={KPI_TARGET_OPTIONS.map(k=>({value:k.value,text:k.value,hint:k.thresholdLabel}))} activeOption={draftKpiTarget} onSelect={(value) => setDraftKpiTarget(value)} disabled={isLocked || !isProjectDirector} />
+                                <div className="pt-2"><Button variant="secondary" onClick={saveKpiTargetNow} disabled={isLocked || !draftKpiTarget || savingKpiTarget || !isProjectDirector}>{savingKpiTarget ? "SAVING..." : "LOCK KPI TARGET"}</Button></div>
+                              </div>
+                            ) : (
+                              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400 shadow-inner">KPI TARGET NOT SET IN R1</div>
+                            )}
+                          </DecisionOwnershipGate>
                         </div>
 
                         {deckEvents.length > 0 && (
+                          <DecisionOwnershipGate decisionKey="strategic_posture" currentRole={currentRole} roleAssignments={roleAssignments}>
                           <div className="p-5 rounded-2xl bg-slate-900/40 border border-teal-500/30 space-y-4">
                             <div className="text-[10px] font-bold uppercase tracking-widest text-teal-500 flex items-center justify-between">
                               <span>Event Deck (Action Required)</span>
@@ -2381,7 +3086,7 @@ export default function RoundDecisionPage() {
                                         options={evt.choices.map(c => ({ value: c.id, text: c.label, hint: c.theoryHint }))}
                                         activeOption={eventsChosen[evt.id] || ""}
                                         onSelect={(v) => updateEventChoice(evt.id, v)}
-                                        disabled={isLocked}
+                                        disabled={isLocked || !isProjectDirector}
                                       />
                                     </div>
                                   </div>
@@ -2389,8 +3094,10 @@ export default function RoundDecisionPage() {
                               ))}
                             </div>
                           </div>
+                          </DecisionOwnershipGate>
                         )}
 
+                        <DecisionOwnershipGate decisionKey="external_context" currentRole={currentRole} roleAssignments={roleAssignments}>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Live External Context</div>
                           <SegmentedControl
@@ -2400,9 +3107,10 @@ export default function RoundDecisionPage() {
                             }))}
                             activeOption={form.external_context}
                             onSelect={(v)=>update("external_context",v)}
-                            disabled={isLocked}
+                            disabled={isLocked || !isProjectDirector}
                           />
                         </div>
+                        </DecisionOwnershipGate>
 
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="flex items-center justify-between">
@@ -2410,17 +3118,19 @@ export default function RoundDecisionPage() {
                             <div className={`text-[10px] font-mono font-bold ${focusSum===100?"text-emerald-400":"text-rose-400"}`}>TOTAL: {focusSum}/100</div>
                           </div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionSlider label={<FieldLabel label="Cost Focus" tooltip={decisionFieldTooltips.costFocus} />} value={form.focus_cost} min={0} max={100} onChange={v=>update("focus_cost",v)} disabled={isLocked} />
-                            <DecisionSlider label={<FieldLabel label="Quality Focus" tooltip={decisionFieldTooltips.qualityFocus} />} value={form.focus_quality} min={0} max={100} onChange={v=>update("focus_quality",v)} disabled={isLocked} />
-                            <DecisionSlider label={<FieldLabel label="Stakeholder Focus" tooltip={decisionFieldTooltips.stakeholderFocus} />} value={form.focus_stakeholder} min={0} max={100} onChange={v=>update("focus_stakeholder",v)} disabled={isLocked} />
-                            <DecisionSlider label={<FieldLabel label="Speed Focus" tooltip={decisionFieldTooltips.speedFocus} />} value={form.focus_speed} min={0} max={100} onChange={v=>update("focus_speed",v)} disabled={isLocked} />
+                            <DecisionOwnershipGate decisionKey="focus_cost" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Cost Focus" tooltip={decisionFieldTooltips.costFocus} />} value={form.focus_cost} min={0} max={100} onChange={v=>update("focus_cost",v)} disabled={isLocked || currentRole !== "finance_head"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="focus_quality" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Quality Focus" tooltip={decisionFieldTooltips.qualityFocus} />} value={form.focus_quality} min={0} max={100} onChange={v=>update("focus_quality",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="focus_stakeholder" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Stakeholder Focus" tooltip={decisionFieldTooltips.stakeholderFocus} />} value={form.focus_stakeholder} min={0} max={100} onChange={v=>update("focus_stakeholder",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="focus_speed" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Speed Focus" tooltip={decisionFieldTooltips.speedFocus} />} value={form.focus_speed} min={0} max={100} onChange={v=>update("focus_speed",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
                           </div>
                         </div>
                         
+                        <DecisionOwnershipGate decisionKey="strategic_posture" currentRole={currentRole} roleAssignments={roleAssignments}>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Strategic Posture</div>
-                          <SegmentedControl options={postureOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.strategic_posture} onSelect={(v)=>update("strategic_posture",v)} disabled={isLocked} />
+                          <SegmentedControl options={postureOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.strategic_posture} onSelect={(v)=>update("strategic_posture",v)} disabled={isLocked || !isProjectDirector} />
                         </div>
+                        </DecisionOwnershipGate>
                      </div>
                    )}
 
@@ -2430,37 +3140,157 @@ export default function RoundDecisionPage() {
                         <StepContextBanner>
                           {`🏗️ Current portfolio: ${stepProjectContext.scenarioType} | Your strategy: ${stepProjectContext.positioningStrategy}`}
                         </StepContextBanner>
-                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
-                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Sector Selection</div>
-                          <SegmentedControl options={sectorOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.primary_sector} onSelect={(v)=>update("primary_sector",v)} disabled={isLocked} />
-                          <div className="mt-4 flex flex-col bg-slate-950/50 rounded-xl p-4 border border-white/5">
-                            <span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Secondary Sector</span>
-                            <select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm font-semibold text-white focus:border-blue-500 outline-none" value={form.secondary_sector} disabled={isLocked} onChange={e=>update("secondary_sector",e.target.value as SecondarySector)}>
-                               {secondarySectorOptions.map(o=><option key={o} value={o}>{o}</option>)}
-                            </select>
+                        <div className="rounded-[28px] border border-cyan-400/20 bg-gradient-to-br from-cyan-400/10 via-slate-950/90 to-slate-950 px-5 py-5 shadow-[0_18px_45px_rgba(2,6,23,0.32)]">
+                          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                            <div className="space-y-2">
+                              <div className="text-[10px] font-bold uppercase tracking-[0.26em] text-cyan-300">Management Decisions - Round {roundNumber}</div>
+                              <div className="text-2xl font-black uppercase tracking-tight text-white">MANAGEMENT DECISIONS - Round {roundNumber}</div>
+                              <p className="max-w-2xl text-sm leading-6 text-slate-300">
+                                Your team faces {roundDilemmas.length} decisions this round. Discuss before committing.
+                              </p>
+                            </div>
+                            <div className="rounded-2xl border border-cyan-400/20 bg-slate-950/75 px-4 py-3 text-right">
+                              <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Committed</div>
+                              <div className="mt-1 text-2xl font-black text-cyan-100">{selectedDilemmaCount}/{roundDilemmas.length}</div>
+                            </div>
+                          </div>
+                          <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                            <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
+                              <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Bid posture</div>
+                              <div className="mt-2 text-lg font-black text-white">{describeBidAggressiveness(form.bid_aggressiveness)}</div>
+                              <div className="mt-1 text-xs text-slate-400">Engine value {form.bid_aggressiveness}/5</div>
+                            </div>
+                            <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
+                              <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Risk appetite</div>
+                              <div className="mt-2 text-lg font-black text-white">{form.risk_appetite}</div>
+                              <div className="mt-1 text-xs text-slate-400">Derived from the choices above</div>
+                            </div>
+                            <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
+                              <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Governance</div>
+                              <div className="mt-2 text-lg font-black text-white">{form.governance_intensity}</div>
+                              <div className="mt-1 text-xs text-slate-400">Tracks safety and stakeholder trade-offs</div>
+                            </div>
+                            <div className="rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-4">
+                              <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Message tone</div>
+                              <div className="mt-2 text-lg font-black text-white">{form.public_message_tone}</div>
+                              <div className="mt-1 text-xs text-slate-400">Auto-shaped by the stance you take</div>
+                            </div>
                           </div>
                         </div>
 
-                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
-                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Market Expansion</div>
-                          <SegmentedControl options={expansionOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.market_expansion} onSelect={(v)=>update("market_expansion",v)} disabled={isLocked} />
+                        <div className="space-y-5">
+                          {roundDilemmas.map((dilemma) => (
+                            <div key={dilemma.id} className="rounded-[28px] border border-white/10 bg-slate-900/45 px-5 py-5 shadow-[0_18px_45px_rgba(2,6,23,0.22)]">
+                              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-xl font-black tracking-tight text-white">{dilemma.title}</div>
+                                  <p className="mt-3 max-w-3xl text-sm italic leading-6 text-slate-400">{dilemma.situation}</p>
+                                </div>
+                                <div className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.22em] text-cyan-100">
+                                  {getCategoryLabel(dilemma.category)}
+                                </div>
+                              </div>
+
+                              <div className="mt-5 grid gap-4 md:grid-cols-2">
+                                {dilemma.options.map((option) => {
+                                  const selected = selectedDilemmaOptionIds[dilemma.id] === option.id;
+                                  const dilemmaOwnerKey = `dilemma_${dilemma.category}`;
+                                  const dilemmaOwnedByCurrentRole = getDecisionOwner(dilemmaOwnerKey) === currentRole;
+
+                                  return (
+                                    <DecisionOwnershipGate decisionKey={dilemmaOwnerKey} currentRole={currentRole} roleAssignments={roleAssignments} key={option.id}>
+                                    <button
+                                      type="button"
+                                      disabled={isLocked || !dilemmaOwnedByCurrentRole}
+                                      title={buildImpactPreview(option)}
+                                      onClick={() => updateDilemmaChoice(dilemma.id, option.id)}
+                                      className={cn(
+                                        "group relative flex min-h-[176px] flex-col rounded-[24px] border px-4 py-4 text-left transition",
+                                        selected
+                                          ? "border-cyan-400 bg-cyan-400/10 shadow-[0_0_0_1px_rgba(34,211,238,0.22)]"
+                                          : "border-white/10 bg-slate-950/75 hover:border-white/20 hover:bg-slate-950",
+                                        isLocked ? "cursor-default" : "cursor-pointer"
+                                      )}
+                                    >
+                                      <div className="flex items-start justify-between gap-3">
+                                        <div className="text-base font-bold text-white">{option.label}</div>
+                                        {selected ? (
+                                          <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-cyan-400/40 bg-cyan-400/20 text-cyan-100">
+                                            <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+                                              <path d="M3 8.5L6.5 12L13 4.5" strokeLinecap="round" strokeLinejoin="round" />
+                                            </svg>
+                                          </span>
+                                        ) : null}
+                                      </div>
+                                      <p className="mt-3 text-sm leading-6 text-slate-300">{option.description}</p>
+                                      <div className="mt-4">
+                                        <span className={cn("rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.22em]", riskBadgeTone(option.risk_level))}>
+                                          {option.risk_level}
+                                        </span>
+                                      </div>
+                                      <div className="mt-auto pt-5 text-xs font-semibold text-slate-400 opacity-100 md:opacity-0 md:transition-opacity md:group-hover:opacity-100 md:group-focus-visible:opacity-100">
+                                        {buildImpactPreview(option)}
+                                      </div>
+                                    </button>
+                                    </DecisionOwnershipGate>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))}
                         </div>
 
-                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
-                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Portfolio Posture</div>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionSlider label={<FieldLabel label="Bid Aggressiveness" tooltip={decisionFieldTooltips.bidAggressiveness} />} value={form.bid_aggressiveness} min={1} max={5} onChange={v=>update("bid_aggressiveness",v)} disabled={isLocked} />
-                            <DecisionSlider label={<FieldLabel label="Public Project Mix" tooltip={decisionFieldTooltips.publicProjectMix} />} value={form.project_mix_public_pct} min={0} max={100} suffix="%" onChange={v=>update("project_mix_public_pct",v)} disabled={isLocked} />
+                        <div className="rounded-[26px] border border-white/10 bg-slate-900/45 px-5 py-5">
+                          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <div>
+                              <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Portfolio Context</div>
+                              <div className="mt-2 text-sm text-slate-300">
+                                Less dramatic inputs that still shape the engine underneath the dilemmas.
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setShowPortfolioContext((current) => !current)}
+                              className="inline-flex items-center justify-center rounded-full border border-white/10 bg-slate-950/80 px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-200 transition hover:border-white/20 hover:bg-slate-950"
+                            >
+                              {showPortfolioContext ? "Hide context" : "Open context"}
+                            </button>
                           </div>
-                        </div>
 
-                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
-                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Governance & Risk</div>
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <div className="flex flex-col"><span className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500"><FieldLabel label="Risk Appetite" tooltip={decisionFieldTooltips.riskAppetite} /></span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.risk_appetite} disabled={isLocked} onChange={e=>update("risk_appetite",e.target.value as RiskAppetite)}>{riskOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-                            <div className="flex flex-col"><span className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500"><FieldLabel label="Governance Intensity" tooltip={decisionFieldTooltips.governanceIntensity} /></span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.governance_intensity} disabled={isLocked} onChange={e=>update("governance_intensity",e.target.value as Governance)}>{governanceOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-                            <div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Message Tone</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.public_message_tone} disabled={isLocked} onChange={e=>update("public_message_tone",e.target.value as MessageTone)}>{messageToneOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-                          </div>
+                          {showPortfolioContext ? (
+                            <div className="mt-5 space-y-5">
+                              <div className="rounded-2xl border border-white/10 bg-slate-950/65 px-4 py-4">
+                                <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Sector Selection</div>
+                                <div className="mt-4">
+                                  <DecisionOwnershipGate decisionKey="primary_sector" currentRole={currentRole} roleAssignments={roleAssignments}>
+                                    <SegmentedControl options={sectorOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.primary_sector} onSelect={(v)=>update("primary_sector",v)} disabled={isLocked || currentRole !== "contracts_manager"} />
+                                  </DecisionOwnershipGate>
+                                </div>
+                                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                                  <DecisionOwnershipGate decisionKey="secondary_sector" currentRole={currentRole} roleAssignments={roleAssignments}>
+                                  <div className="flex flex-col">
+                                    <span className="mb-2 text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Secondary Sector</span>
+                                    <select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm font-semibold text-white outline-none focus:border-cyan-500" value={form.secondary_sector} disabled={isLocked || currentRole !== "contracts_manager"} onChange={e=>update("secondary_sector",e.target.value as SecondarySector)}>
+                                      {secondarySectorOptions.map(o=><option key={o} value={o}>{o}</option>)}
+                                    </select>
+                                  </div>
+                                  </DecisionOwnershipGate>
+                                  <DecisionOwnershipGate decisionKey="project_mix_public_pct" currentRole={currentRole} roleAssignments={roleAssignments}>
+                                    <DecisionSlider label={<FieldLabel label="Public Project Mix" tooltip={decisionFieldTooltips.publicProjectMix} />} value={form.project_mix_public_pct} min={0} max={100} suffix="%" onChange={v=>update("project_mix_public_pct",v)} disabled={isLocked || currentRole !== "contracts_manager"} />
+                                  </DecisionOwnershipGate>
+                                </div>
+                              </div>
+
+                              <DecisionOwnershipGate decisionKey="market_expansion" currentRole={currentRole} roleAssignments={roleAssignments}>
+                              <div className="rounded-2xl border border-white/10 bg-slate-950/65 px-4 py-4">
+                                <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Market Expansion</div>
+                                <div className="mt-4">
+                                  <SegmentedControl options={expansionOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.market_expansion} onSelect={(v)=>update("market_expansion",v)} disabled={isLocked || !isProjectDirector} />
+                                </div>
+                              </div>
+                              </DecisionOwnershipGate>
+                            </div>
+                          ) : null}
                         </div>
                      </div>
                    )}
@@ -2471,36 +3301,42 @@ export default function RoundDecisionPage() {
                         <StepContextBanner>
                           {`👷 Team context: ${stepProjectContext.complexity} complexity project`}
                         </StepContextBanner>
-                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
+                        <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Delivery Mix & Assets</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionSlider label="Self-Perform Share" value={form.self_perform_percent} min={0} max={100} suffix="%" onChange={v=>update("self_perform_percent",v)} disabled={isLocked} />
-                            <DecisionSlider label={<FieldLabel label="P&M Utilization Target" tooltip={decisionFieldTooltips.pmUtilizationTarget} />} value={form.pm_utilization_target} min={40} max={95} suffix="%" onChange={v=>update("pm_utilization_target",v)} disabled={isLocked} />
-                            <DecisionSlider label={<FieldLabel label="Specialized Capability" tooltip={decisionFieldTooltips.specializedCapability} />} value={form.specialized_work_index} min={0} max={100} onChange={v=>update("specialized_work_index",v)} disabled={isLocked} />
-                            <DecisionSlider label={<FieldLabel label="Work-Life Balance" tooltip={decisionFieldTooltips.workLifeBalance} />} value={form.work_life_balance_index} min={0} max={100} onChange={v=>update("work_life_balance_index",v)} disabled={isLocked} />
+                            <DecisionOwnershipGate decisionKey="self_perform_percent" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Self-Perform Share" value={form.self_perform_percent} min={0} max={100} suffix="%" onChange={v=>update("self_perform_percent",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="pm_utilization_target" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="P&M Utilization Target" tooltip={decisionFieldTooltips.pmUtilizationTarget} />} value={form.pm_utilization_target} min={40} max={95} suffix="%" onChange={v=>update("pm_utilization_target",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="specialized_work_index" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Specialized Capability" tooltip={decisionFieldTooltips.specializedCapability} />} value={form.specialized_work_index} min={0} max={100} onChange={v=>update("specialized_work_index",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="work_life_balance_index" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Work-Life Balance" tooltip={decisionFieldTooltips.workLifeBalance} />} value={form.work_life_balance_index} min={0} max={100} onChange={v=>update("work_life_balance_index",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
                           </div>
                         </div>
+                        <DecisionOwnershipGate decisionKey="subcontractor_profile" currentRole={currentRole} roleAssignments={roleAssignments}>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Subcontractor Profile</div>
-                          <SegmentedControl options={subcontractorOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.subcontractor_profile} onSelect={(v)=>update("subcontractor_profile",v)} disabled={isLocked} />
+                          <SegmentedControl options={subcontractorOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.subcontractor_profile} onSelect={(v)=>update("subcontractor_profile",v)} disabled={isLocked || currentRole !== "contracts_manager"} />
                         </div>
+                        </DecisionOwnershipGate>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Workforce Dynamics</div>
-                          <SegmentedControl options={workforceOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.workforce_plan} onSelect={(v)=>update("workforce_plan",v)} disabled={isLocked} />
+                          <DecisionOwnershipGate decisionKey="workforce_plan" currentRole={currentRole} roleAssignments={roleAssignments}>
+                            <SegmentedControl options={workforceOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.workforce_plan} onSelect={(v)=>update("workforce_plan",v)} disabled={isLocked || currentRole !== "hse_manager"} />
+                          </DecisionOwnershipGate>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                            <div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Load State</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm text-white font-semibold outline-none" value={form.workforce_load_state} disabled={isLocked} onChange={e=>update("workforce_load_state",e.target.value as WorkforceLoadState)}>{workloadOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-                            <div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">QA Frequency</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm text-white font-semibold outline-none" value={form.qa_audit_frequency} disabled={isLocked} onChange={e=>update("qa_audit_frequency",e.target.value as QaFrequency)}>{qaOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                            <DecisionOwnershipGate decisionKey="workforce_load_state" currentRole={currentRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Load State</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm text-white font-semibold outline-none" value={form.workforce_load_state} disabled={isLocked || currentRole !== "hse_manager"} onChange={e=>update("workforce_load_state",e.target.value as WorkforceLoadState)}>{workloadOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="qa_audit_frequency" currentRole={currentRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">QA Frequency</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm text-white font-semibold outline-none" value={form.qa_audit_frequency} disabled={isLocked || currentRole !== "planning_manager"} onChange={e=>update("qa_audit_frequency",e.target.value as QaFrequency)}>{qaOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
                           </div>
                         </div>
+                        <DecisionOwnershipGate decisionKey="overtime_policy" currentRole={currentRole} roleAssignments={roleAssignments}>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Overtime Policy</div>
-                          <SegmentedControl options={overtimeOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.overtime_policy} onSelect={(v)=>update("overtime_policy",v)} disabled={isLocked} />
+                          <SegmentedControl options={overtimeOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.overtime_policy} onSelect={(v)=>update("overtime_policy",v)} disabled={isLocked || currentRole !== "hse_manager"} />
                         </div>
+                        </DecisionOwnershipGate>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">L&D and Innovation</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionSlider label="Training Intensity" value={form.training_intensity} min={0} max={100} onChange={v=>update("training_intensity",v)} disabled={isLocked} />
-                            <DecisionSlider label="Innovation Budget" value={form.innovation_budget_index} min={0} max={100} onChange={v=>update("innovation_budget_index",v)} disabled={isLocked} />
+                            <DecisionOwnershipGate decisionKey="training_intensity" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Training Intensity" value={form.training_intensity} min={0} max={100} onChange={v=>update("training_intensity",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="innovation_budget_index" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Innovation Budget" value={form.innovation_budget_index} min={0} max={100} onChange={v=>update("innovation_budget_index",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
                           </div>
                         </div>
                      </div>
@@ -2512,29 +3348,31 @@ export default function RoundDecisionPage() {
                         <StepContextBanner>
                           {`🤝 Stakeholder: ${stepProjectContext.client} expects ${stepProjectContext.complexity} compliance`}
                         </StepContextBanner>
+                         <DecisionOwnershipGate decisionKey="logistics_resilience" currentRole={currentRole} roleAssignments={roleAssignments}>
                          <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Logistics & Buffer</div>
-                          <SegmentedControl options={logisticsOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.logistics_resilience} onSelect={(v)=>update("logistics_resilience",v)} disabled={isLocked} />
+                          <SegmentedControl options={logisticsOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.logistics_resilience} onSelect={(v)=>update("logistics_resilience",v)} disabled={isLocked || currentRole !== "planning_manager"} />
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                            <DecisionSlider label={<FieldLabel label="Buffer" tooltip={decisionFieldTooltips.buffer} />} value={form.buffer_percent} min={0} max={15} suffix="%" onChange={v=>update("buffer_percent",v)} disabled={isLocked} />
-                            <DecisionSlider label="Inventory Cover" value={form.inventory_cover_weeks} min={1} max={12} suffix="w" onChange={v=>update("inventory_cover_weeks",v)} disabled={isLocked} />
+                            <DecisionOwnershipGate decisionKey="buffer_percent" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Buffer" tooltip={decisionFieldTooltips.buffer} />} value={form.buffer_percent} min={0} max={15} suffix="%" onChange={v=>update("buffer_percent",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="inventory_cover_weeks" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Inventory Cover" value={form.inventory_cover_weeks} min={1} max={12} suffix="w" onChange={v=>update("inventory_cover_weeks",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
                           </div>
                         </div>
+                        </DecisionOwnershipGate>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Stakeholder Engagement</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionSlider label={<FieldLabel label="Community Engagement" tooltip={decisionFieldTooltips.communityEngagement} />} value={form.community_engagement} min={0} max={100} onChange={v=>update("community_engagement",v)} disabled={isLocked} />
-                            <DecisionSlider label="Digital Visibility Spend" value={form.digital_visibility_spend} min={0} max={100} onChange={v=>update("digital_visibility_spend",v)} disabled={isLocked} />
-                            <DecisionSlider label={<FieldLabel label="CSR & Sustainability" tooltip={decisionFieldTooltips.csrSustainability} />} value={form.csr_sustainability_index} min={0} max={100} onChange={v=>update("csr_sustainability_index",v)} disabled={isLocked} />
-                            <DecisionSlider label={<FieldLabel label="Facilitation Risk Budget" tooltip={decisionFieldTooltips.facilitationRiskBudget} />} value={form.facilitation_budget_index} min={0} max={100} onChange={v=>update("facilitation_budget_index",v)} disabled={isLocked} />
+                            <DecisionOwnershipGate decisionKey="community_engagement" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Community Engagement" tooltip={decisionFieldTooltips.communityEngagement} />} value={form.community_engagement} min={0} max={100} onChange={v=>update("community_engagement",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="digital_visibility_spend" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Digital Visibility Spend" value={form.digital_visibility_spend} min={0} max={100} onChange={v=>update("digital_visibility_spend",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="csr_sustainability_index" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="CSR & Sustainability" tooltip={decisionFieldTooltips.csrSustainability} />} value={form.csr_sustainability_index} min={0} max={100} onChange={v=>update("csr_sustainability_index",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="facilitation_budget_index" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Facilitation Risk Budget" tooltip={decisionFieldTooltips.facilitationRiskBudget} />} value={form.facilitation_budget_index} min={0} max={100} onChange={v=>update("facilitation_budget_index",v)} disabled={isLocked || currentRole !== "finance_head"} /></DecisionOwnershipGate>
                           </div>
                         </div>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Compliance & Transparency</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                             <div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Compliance Posture</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.compliance_posture} disabled={isLocked} onChange={e=>update("compliance_posture",e.target.value as CompliancePosture)}>{complianceOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-                             <div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Vendor Strategy</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.vendor_strategy} disabled={isLocked} onChange={e=>update("vendor_strategy",e.target.value as VendorStrategy)}>{vendorOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-                             <div className="flex flex-col lg:col-span-1 md:col-span-2"><span className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">Transparency Mode</span><SegmentedControl options={transparencyOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.transparency_level} onSelect={(v)=>update("transparency_level",v)} disabled={isLocked} /></div>
+                             <DecisionOwnershipGate decisionKey="compliance_posture" currentRole={currentRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Compliance Posture</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.compliance_posture} disabled={isLocked || currentRole !== "finance_head"} onChange={e=>update("compliance_posture",e.target.value as CompliancePosture)}>{complianceOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
+                             <DecisionOwnershipGate decisionKey="vendor_strategy" currentRole={currentRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Vendor Strategy</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.vendor_strategy} disabled={isLocked || currentRole !== "contracts_manager"} onChange={e=>update("vendor_strategy",e.target.value as VendorStrategy)}>{vendorOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
+                             <DecisionOwnershipGate decisionKey="transparency_level" currentRole={currentRole} roleAssignments={roleAssignments}><div className="flex flex-col lg:col-span-1 md:col-span-2"><span className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">Transparency Mode</span><SegmentedControl options={transparencyOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.transparency_level} onSelect={(v)=>update("transparency_level",v)} disabled={isLocked || currentRole !== "hse_manager"} /></div></DecisionOwnershipGate>
                           </div>
                         </div>
                      </div>
@@ -2550,14 +3388,16 @@ export default function RoundDecisionPage() {
                               : `₹${formatBudgetCr(stepProjectContext.baseBudgetCr)} Cr`
                           } | Rounds remaining: ${roundsRemaining}`}
                         </StepContextBanner>
+                         <DecisionOwnershipGate decisionKey="financing_posture" currentRole={currentRole} roleAssignments={roleAssignments}>
                          <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                            <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Financing Strategy</div>
-                           <SegmentedControl options={financingOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.financing_posture} onSelect={(v)=>update("financing_posture",v)} disabled={isLocked} />
+                           <SegmentedControl options={financingOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.financing_posture} onSelect={(v)=>update("financing_posture",v)} disabled={isLocked || currentRole !== "finance_head"} />
                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                             <DecisionSlider label="Cash Buffer" value={form.cash_buffer_months} min={1} max={12} suffix="m" onChange={v=>update("cash_buffer_months",v)} disabled={isLocked} />
-                             <DecisionSlider label="Contingency Fund" value={form.contingency_fund_percent} min={0} max={20} suffix="%" onChange={v=>update("contingency_fund_percent",v)} disabled={isLocked} />
+                             <DecisionOwnershipGate decisionKey="cash_buffer_months" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Cash Buffer" value={form.cash_buffer_months} min={1} max={12} suffix="m" onChange={v=>update("cash_buffer_months",v)} disabled={isLocked || currentRole !== "finance_head"} /></DecisionOwnershipGate>
+                             <DecisionOwnershipGate decisionKey="contingency_fund_percent" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Contingency Fund" value={form.contingency_fund_percent} min={0} max={20} suffix="%" onChange={v=>update("contingency_fund_percent",v)} disabled={isLocked || currentRole !== "finance_head"} /></DecisionOwnershipGate>
                            </div>
                         </div>
+                        </DecisionOwnershipGate>
                         <div className="p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-4">
                            <div className="text-[10px] font-bold uppercase tracking-widest text-amber-500">Deterministic Preview</div>
                            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
@@ -2566,6 +3406,7 @@ export default function RoundDecisionPage() {
                              <div className="flex flex-col"><span className="text-[10px] uppercase text-amber-500/70">Points Expected</span><span className="text-xl font-mono font-bold text-amber-400">+{Math.round(previewResult.points_earned)}</span></div>
                            </div>
                         </div>
+                        <DecisionOwnershipGate decisionKey="forecast" currentRole={currentRole} roleAssignments={roleAssignments}>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-purple-500/30 space-y-4 mt-6">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-purple-400">Pre-Lock Forecast</div>
                           <p className="text-xs text-slate-400">Before locking, predict your performance. Future rounds will tie point bonuses to prediction calibration.</p>
@@ -2577,7 +3418,7 @@ export default function RoundDecisionPage() {
                                max={1.35}
                                step={0.01}
                                onChange={(v) => { setHasUnsavedChanges(true); setForecast(p => ({...p, predicted_schedule_index: v})); }}
-                               disabled={isLocked}
+                               disabled={isLocked || currentRole !== "finance_head"}
                                formatValue={(v) => v.toFixed(2)}
                                hint="> 1.0 means ahead of schedule"
                              />
@@ -2588,7 +3429,7 @@ export default function RoundDecisionPage() {
                                max={1.50}
                                step={0.01}
                                onChange={(v) => { setHasUnsavedChanges(true); setForecast(p => ({...p, predicted_cost_index: v})); }}
-                               disabled={isLocked}
+                               disabled={isLocked || currentRole !== "finance_head"}
                                formatValue={(v) => v.toFixed(2)}
                                hint="> 1.0 means under budget"
                              />
@@ -2599,12 +3440,13 @@ export default function RoundDecisionPage() {
                                max={100}
                                step={5}
                                onChange={(v) => { setHasUnsavedChanges(true); setForecast(p => ({...p, confidence: v})); }}
-                               disabled={isLocked}
+                               disabled={isLocked || currentRole !== "finance_head"}
                                formatValue={(v) => v + "%"}
                                hint="Over-confidence will be heavily penalized later."
                              />
                           </div>
                         </div>
+                        </DecisionOwnershipGate>
                      </div>
                    )}
 
@@ -2621,11 +3463,12 @@ export default function RoundDecisionPage() {
                        <div className="flex items-center gap-1">
                          {stepTitles.map((title, index) => {
                            const idx = index as StepIndex;
+                           const ownsStep = roleOwnsStep(currentRole, idx + 1);
                            return (
                              <div
                                key={`mobile-progress-${title}`}
                                className={`h-2 w-6 rounded-full ${
-                                 activeStep === idx ? "bg-blue-500" : activeStep > idx ? "bg-emerald-500/70" : "bg-slate-800"
+                                 activeStep === idx ? (ownsStep ? "bg-teal-400" : "bg-slate-500") : activeStep > idx ? (ownsStep ? "bg-teal-700" : "bg-slate-700") : ownsStep ? "bg-teal-950" : "bg-slate-800"
                                }`}
                              />
                            );
@@ -2651,18 +3494,24 @@ export default function RoundDecisionPage() {
                          <Button
                            variant="secondary"
                            onClick={saveDraft}
-                           disabled={saving || isLocked}
+                           disabled={saving || isLocked || !currentRole}
                            className="w-full border-slate-700 bg-slate-900 text-slate-200"
                          >
                            {saving ? "Saving..." : "Save Draft"}
                          </Button>
-                         <Button
-                           onClick={openLockConfirmation}
-                           disabled={locking || saving || isLocked || !stepValidations[4]}
-                           className="w-full"
-                         >
-                           {locking ? "Initializing..." : lockBlockedByDeadline ? "Window Closed" : "Lock and Generate Results"}
-                         </Button>
+                         {isProjectDirector ? (
+                           <Button
+                             onClick={openLockConfirmation}
+                             disabled={locking || saving || isLocked || !stepValidations[4] || !allAssignedRolesReady}
+                             className="w-full"
+                           >
+                             {locking ? "Initializing..." : lockBlockedByDeadline ? "Window Closed" : "Lock and Generate Results"}
+                           </Button>
+                         ) : (
+                           <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-center text-xs font-bold uppercase tracking-[0.2em] text-slate-300">
+                             Waiting for Project Director to lock
+                           </div>
+                         )}
                          <div className="text-center text-[10px] font-bold uppercase tracking-[0.22em]">
                            {hasUnsavedChanges ? (
                              <span className="text-amber-400">Unsaved Draft</span>
@@ -2683,6 +3532,7 @@ export default function RoundDecisionPage() {
                       {stepTitles.map((title, index) => {
                         const idx = index as StepIndex;
                         const current = activeStep === idx;
+                        const ownsStep = roleOwnsStep(currentRole, idx + 1);
                         return (
                           <button
                             key={`sidebar-step-${title}`}
@@ -2690,8 +3540,12 @@ export default function RoundDecisionPage() {
                             onClick={() => requestStepNavigation(idx, "stepper-sidebar")}
                             className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-3 text-left transition ${
                               current
-                                ? "border-blue-500/40 bg-blue-500/15 text-white"
-                                : "border-white/5 bg-slate-950/70 text-slate-300 hover:border-white/10 hover:bg-slate-900"
+                                ? ownsStep
+                                  ? "border-teal-400/40 bg-teal-500/15 text-white"
+                                  : "border-slate-500/40 bg-slate-800 text-white"
+                                : ownsStep
+                                  ? "border-teal-950 bg-slate-950/70 text-slate-200 hover:border-teal-800 hover:bg-slate-900"
+                                  : "border-white/5 bg-slate-950/70 text-slate-500 hover:border-white/10 hover:bg-slate-900"
                             }`}
                           >
                             <div className="min-w-0">
@@ -2702,7 +3556,7 @@ export default function RoundDecisionPage() {
                             </div>
                             <span
                               className={`h-2.5 w-2.5 shrink-0 rounded-full ${
-                                current ? "bg-blue-400" : stepValidations[idx] ? "bg-emerald-400" : "bg-slate-700"
+                                current ? (ownsStep ? "bg-teal-300" : "bg-slate-300") : stepValidations[idx] ? (ownsStep ? "bg-teal-500" : "bg-slate-500") : ownsStep ? "bg-teal-900" : "bg-slate-700"
                               }`}
                             />
                           </button>
@@ -2777,6 +3631,8 @@ export default function RoundDecisionPage() {
                       ))}
                     </div>
                   </SidebarAccordion>
+
+                  <CompetitorIntelFeed sessionId={sessionId} teamId={teamId} roundNumber={roundNumber} />
                 </aside>
              </div>
              </>
@@ -2814,7 +3670,22 @@ export default function RoundDecisionPage() {
                 </Button>
                 <div className="hidden md:flex flex-row gap-1">
                   {[0,1,2,3,4].map(idx => (
-                     <div key={idx} className={`w-8 h-2 rounded-full transition-all ${activeStep === idx ? "bg-blue-500" : activeStep > idx ? "bg-blue-900" : "bg-slate-800"}`} />
+                     <div
+                       key={idx}
+                       className={`w-8 h-2 rounded-full transition-all ${
+                         activeStep === idx
+                           ? roleOwnsStep(currentRole, idx + 1)
+                             ? "bg-teal-400"
+                             : "bg-slate-500"
+                           : activeStep > idx
+                             ? roleOwnsStep(currentRole, idx + 1)
+                               ? "bg-teal-700"
+                               : "bg-slate-700"
+                             : roleOwnsStep(currentRole, idx + 1)
+                               ? "bg-teal-950"
+                               : "bg-slate-800"
+                       }`}
+                     />
                   ))}
                 </div>
                 <Button variant="ghost" onClick={nextStep} disabled={activeStep === 4 || isLocked} className="text-slate-400 hover:text-white">
@@ -2838,12 +3709,18 @@ export default function RoundDecisionPage() {
                          <span className="text-emerald-500 uppercase">Input Accepted</span>
                        )}
                      </div>
-                     <Button variant="secondary" onClick={saveDraft} disabled={saving || isLocked} className="w-full md:w-auto border-slate-700 bg-slate-900 text-slate-300 py-3 text-[11px] tracking-widest">
+                     <Button variant="secondary" onClick={saveDraft} disabled={saving || isLocked || !currentRole} className="w-full md:w-auto border-slate-700 bg-slate-900 text-slate-300 py-3 text-[11px] tracking-widest">
                        {saving ? "SAVING..." : "SAVE DRAFT"}
                      </Button>
-                     <Button onClick={openLockConfirmation} disabled={locking || saving || isLocked || !stepValidations[4]} className="w-full md:w-auto shadow-blue-500/40 py-3 text-[11px] tracking-widest">
-                       {locking ? "INITIALIZING..." : lockBlockedByDeadline ? "WINDOW CLOSED" : "LOCK AND GENERATE RESULTS"}
-                     </Button>
+                     {isProjectDirector ? (
+                       <Button onClick={openLockConfirmation} disabled={locking || saving || isLocked || !stepValidations[4] || !allAssignedRolesReady} className="w-full md:w-auto shadow-blue-500/40 py-3 text-[11px] tracking-widest">
+                         {locking ? "INITIALIZING..." : lockBlockedByDeadline ? "WINDOW CLOSED" : "LOCK AND GENERATE RESULTS"}
+                       </Button>
+                     ) : (
+                       <div className="flex items-center rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-300">
+                         Waiting for Project Director to lock
+                       </div>
+                     )}
                    </>
                  )}
               </div>

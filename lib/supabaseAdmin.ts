@@ -11,7 +11,9 @@ export function getSupabaseAdminClient() {
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!url || !serviceRoleKey) {
-    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY for secure server scoring.");
+    throw new Error(
+      "Secure round scoring requires NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY. Add the service-role key to .env.local and your Vercel environment variables."
+    );
   }
 
   supabaseAdmin = createClient(url, serviceRoleKey, {

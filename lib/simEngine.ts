@@ -1,4 +1,5 @@
 import { ConstructionEvent } from "@/lib/constructionNews";
+import type { CarryoverState } from "@/lib/consequenceEngine";
 import {
   DecisionProfile,
   DEFAULT_DECISION_PROFILE,
@@ -32,6 +33,11 @@ export type RoundResult = {
   claim_entitlement_score: number;
   points_earned: number;
   penalties: number;
+  ld_triggered: boolean;
+  ld_amount_cr: number;
+  ld_cumulative_cr: number;
+  ld_weeks: number;
+  ld_capped: boolean;
   detail: Record<string, unknown>;
 };
 
@@ -40,6 +46,8 @@ export type RoundComputationContext = {
   prevResult?: RoundResult | null;
   prevProfile?: DecisionProfile | null;
   events?: ConstructionEvent[];
+  carryoverState?: CarryoverState | null;
+  baseBudgetCr?: number | null;
 };
 
 type RiskDebtState = {
@@ -51,12 +59,87 @@ type RiskDebtState = {
   cash: number;
 };
 
+type LiquidatedDamagesComputation = {
+  cash_closing: number;
+  stakeholder_score: number;
+  ld_triggered: boolean;
+  ld_amount_cr: number;
+  ld_cumulative_cr: number;
+  ld_weeks: number;
+  ld_capped: boolean;
+  ld_cap_cr: number;
+  rate_cr: number;
+  stakeholderPenalty: number;
+  cashDeduction: number;
+};
+
+const LD_SPI_THRESHOLD = 0.9;
+const LD_RATE_PERCENT = 0.005;
+const LD_CAP_PERCENT = 0.1;
+const LD_STAKEHOLDER_PENALTY = 5;
+const CRORE_TO_RUPEES = 10_000_000;
+
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
 function toNumber(value: unknown, fallback = 0) {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function roundCurrencyCr(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function computeLiquidatedDamages(params: {
+  scheduleIndex: number;
+  stakeholderScore: number;
+  cashClosing: number;
+  baseBudgetCr?: number | null;
+  previousCumulativeCr?: number;
+  previousWeeks?: number;
+}): LiquidatedDamagesComputation {
+  const scheduleIndex = params.scheduleIndex;
+  const stakeholderScore = params.stakeholderScore;
+  const cashClosing = params.cashClosing;
+  const baseBudgetCr = Math.max(0, toNumber(params.baseBudgetCr, 0));
+  const previousCumulativeCr = Math.max(0, toNumber(params.previousCumulativeCr, 0));
+  const previousWeeks = Math.max(0, Math.trunc(toNumber(params.previousWeeks, 0)));
+  const ldCapCr = roundCurrencyCr(baseBudgetCr * LD_CAP_PERCENT);
+  const ldRateCr = roundCurrencyCr(baseBudgetCr * LD_RATE_PERCENT);
+  const spiBreached = scheduleIndex < LD_SPI_THRESHOLD;
+  const ldApplicable = baseBudgetCr > 0;
+  const capReachedBeforeRound = ldApplicable && ldCapCr > 0 && previousCumulativeCr >= ldCapCr;
+  const remainingCapCr = Math.max(0, ldCapCr - previousCumulativeCr);
+  const ldAmountCr =
+    ldApplicable && spiBreached && !capReachedBeforeRound && ldRateCr > 0
+      ? roundCurrencyCr(Math.min(ldRateCr, remainingCapCr))
+      : 0;
+  const ldCumulativeCr = roundCurrencyCr(
+    ldCapCr > 0 ? Math.min(ldCapCr, previousCumulativeCr + ldAmountCr) : previousCumulativeCr + ldAmountCr
+  );
+  const ldWeeks = previousWeeks + (ldAmountCr > 0 ? 1 : 0);
+  const stakeholderPenalty = ldAmountCr > 0 ? LD_STAKEHOLDER_PENALTY : 0;
+  const cashDeduction = Math.round(ldAmountCr * CRORE_TO_RUPEES);
+
+  return {
+    cash_closing: cashClosing - cashDeduction,
+    stakeholder_score: clamp(stakeholderScore - stakeholderPenalty, 0, 100),
+    ld_triggered: ldApplicable && spiBreached,
+    ld_amount_cr: ldAmountCr,
+    ld_cumulative_cr: ldCumulativeCr,
+    ld_weeks: ldWeeks,
+    ld_capped: ldApplicable && ldCapCr > 0 && ldCumulativeCr >= ldCapCr,
+    ld_cap_cr: ldCapCr,
+    rate_cr: ldRateCr,
+    stakeholderPenalty,
+    cashDeduction,
+  };
 }
 
 function seededUnit(seed: string) {
@@ -372,6 +455,7 @@ export function computeRoundResultV2(
   context: RoundComputationContext = {}
 ): RoundResult {
   const profile = context.profile ?? DEFAULT_DECISION_PROFILE;
+  const carryoverState = context.carryoverState ?? null;
   const prevResult = context.prevResult ?? null;
   const prevDebt = riskDebtFromResult(prevResult);
   const delayed = delayedEffects(context.prevProfile, prevResult, prevDebt);
@@ -731,16 +815,30 @@ export function computeRoundResultV2(
       -prevDebt.cash * 1700
   );
 
+  const ld = computeLiquidatedDamages({
+    scheduleIndex: schedule_index,
+    stakeholderScore: stakeholder_score,
+    cashClosing: cash_closing,
+    baseBudgetCr: context.baseBudgetCr,
+    previousCumulativeCr: prevResult?.ld_cumulative_cr,
+    previousWeeks: prevResult?.ld_weeks,
+  });
+
   return {
     schedule_index: Number(schedule_index.toFixed(2)),
     cost_index: Number(cost_index.toFixed(2)),
-    cash_closing,
+    cash_closing: ld.cash_closing,
     quality_score: Math.round(quality_score),
     safety_score: Math.round(safety_score),
-    stakeholder_score: Math.round(stakeholder_score),
+    stakeholder_score: Math.round(ld.stakeholder_score),
     claim_entitlement_score: Math.round(claim_entitlement_score),
     points_earned,
     penalties,
+    ld_triggered: ld.ld_triggered,
+    ld_amount_cr: ld.ld_amount_cr,
+    ld_cumulative_cr: ld.ld_cumulative_cr,
+    ld_weeks: ld.ld_weeks,
+    ld_capped: ld.ld_capped,
     detail: {
       seed,
       events: events.map((event) => {
@@ -786,6 +884,15 @@ export function computeRoundResultV2(
       specializationGain: Number(specializationGain.toFixed(3)),
       subcontractorAdjustment: subcontractor,
       workloadAdjustment: workloadAdj,
+      carryoverState,
+      ld: {
+        threshold_spi: LD_SPI_THRESHOLD,
+        rate_cr: ld.rate_cr,
+        cap_cr: ld.ld_cap_cr,
+        cash_deduction: ld.cashDeduction,
+        stakeholder_penalty: ld.stakeholderPenalty,
+        base_budget_cr: roundCurrencyCr(Math.max(0, toNumber(context.baseBudgetCr, 0))),
+      },
     },
   };
 }

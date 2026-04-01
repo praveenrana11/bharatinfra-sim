@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
+import { CompetitorIntelFeed } from "@/components/CompetitorIntelFeed";
+import SiteProgressVisual from "@/components/SiteProgressVisual";
 import { getSupabaseClient } from "@/lib/supabaseClient";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -14,7 +16,8 @@ import { ConstructionEvent, getRoundConstructionEvents } from "@/lib/constructio
 import { computeRoundResultV2, DecisionDraft, RoundResult } from "@/lib/simEngine";
 import { parseDecisionProfile, DEFAULT_DECISION_PROFILE, DecisionProfile } from "@/lib/decisionProfile";
 import { parseKpiTarget, evaluateKpiAchievement, applyKpiMultiplier } from "@/lib/kpi";
-import { getScenarioHeroImageUrl } from "@/lib/simVisuals";
+import { getScenarioFamily, getScenarioHeroImageUrl } from "@/lib/simVisuals";
+import { generateProjectInboxMessages, type InboxIdentityProfile } from "@/lib/inboxEngine";
 import {
   BHARATINFRA_ONBOARDING_STORAGE_KEY,
   HOW_TO_PLAY_SEEN_EVENT,
@@ -23,19 +26,25 @@ import {
 
 type RouteParams = { sessionId?: string };
 type MembershipRow = { team_id: string };
-type IdentityProfile = { primary_kpi?: string | null };
+type IdentityProfile = {
+  company_name?: string | null;
+  positioning_strategy?: string | null;
+  primary_kpi?: string | null;
+};
 type TeamRow = {
   id: string;
   team_name: string;
   session_id: string;
   total_points: number | null;
+  total_ld_cr: number | string | null;
   kpi_target: string | null;
   identity_profile: IdentityProfile | null;
   identity_completed: boolean;
   scenario_id: string | null;
 };
-type SessionTeamRow = { id: string; kpi_target: string | null };
+type SessionTeamRow = { id: string; kpi_target: string | null; scenario_id: string | null };
 type ScenarioRow = { name: string | null; client: string | null; duration_rounds: number | null };
+type ScenarioBudgetRow = { id: string; base_budget_cr: number | string | null };
 type DecisionRow = DecisionDraft & { locked: boolean; raw: Record<string, unknown> | null };
 type TeamResultFullRow = {
   schedule_index: number;
@@ -47,15 +56,33 @@ type TeamResultFullRow = {
   claim_entitlement_score: number;
   points_earned: number;
   penalties: number;
+  ld_triggered: boolean;
+  ld_amount_cr: number | string | null;
+  ld_cumulative_cr: number | string | null;
+  ld_weeks: number | null;
+  ld_capped: boolean;
   detail: Record<string, unknown> | null;
 };
-type TeamScoreRow = { team_id: string; points_earned: number | null };
+type TeamScoreRow = {
+  team_id: string;
+  round_number: number;
+  points_earned: number | null;
+  ld_cumulative_cr: number | string | null;
+};
 type AutoCloseSummary = { autoLockedTeams: number; generatedResults: number; preservedLockedTeams: number; totalLatePenalty: number };
 type SessionRow = { name: string | null; code: string; status: string; round_count: number; current_round: number; created_by: string };
-type TeamResultRow = { round_number: number };
+type TeamResultRow = { round_number: number; ld_capped: boolean | null };
 type SessionRoundRow = { deadline_at: string; status: string | null; news_payload: unknown };
 type LeaderboardEntry = { id: string; teamName: string; totalPoints: number; currentRank: number; previousRank: number };
-type PreviousMetrics = { spi: number | null; cpi: number | null; safety: number | null; points: number | null };
+type PreviousMetrics = {
+  spi: number | null;
+  cpi: number | null;
+  safety: number | null;
+  stakeholder: number | null;
+  points: number | null;
+  ldTriggered: boolean;
+  ldCapped: boolean;
+};
 
 const DEFAULT_ROUND_WINDOW_MINUTES = 35;
 const LATE_PENALTY_PER_MINUTE = 2;
@@ -78,6 +105,19 @@ const isMissingTableError = (message: string) => {
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 const isSessionCompleted = (status: string | null | undefined) => ["complete", "completed"].includes(status?.toLowerCase() ?? "");
 const formatClock = (ms: number) => `${String(Math.floor(Math.max(0, ms) / 60000)).padStart(2, "0")}:${String(Math.floor((Math.max(0, ms) % 60000) / 1000)).padStart(2, "0")}`;
+const toNumber = (value: unknown, fallback = 0) => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+};
+const formatCrores = (value: number) =>
+  new Intl.NumberFormat("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
 const resolvePrimaryKpi = (team: Pick<TeamRow, "kpi_target" | "identity_profile">) =>
   team.kpi_target ?? team.identity_profile?.primary_kpi ?? "Not selected";
 const buildDecisionFromRow = (row: DecisionRow): DecisionDraft => ({
@@ -145,7 +185,9 @@ export default function SessionPage() {
   const [sessionCurrentRound, setSessionCurrentRound] = useState(0);
   const [teamId, setTeamId] = useState("");
   const [teamName, setTeamName] = useState("");
+  const [teamIdentityProfile, setTeamIdentityProfile] = useState<InboxIdentityProfile>({});
   const [points, setPoints] = useState(0);
+  const [totalLdCr, setTotalLdCr] = useState(0);
   const [teamKpi, setTeamKpi] = useState("Not selected");
   const [completedRound, setCompletedRound] = useState(0);
   const [viewerUserId, setViewerUserId] = useState("");
@@ -164,7 +206,15 @@ export default function SessionPage() {
   const [showHowToPlayButton, setShowHowToPlayButton] = useState(false);
   const [clockNow, setClockNow] = useState(0);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
-  const [previousMetrics, setPreviousMetrics] = useState<PreviousMetrics>({ spi: null, cpi: null, safety: null, points: null });
+  const [previousMetrics, setPreviousMetrics] = useState<PreviousMetrics>({
+    spi: null,
+    cpi: null,
+    safety: null,
+    stakeholder: null,
+    points: null,
+    ldTriggered: false,
+    ldCapped: false,
+  });
   const onboardingCheckRef = useRef(false);
 
   useEffect(() => {
@@ -173,25 +223,66 @@ export default function SessionPage() {
   }, []);
 
   async function refreshSessionAnalytics(activeTeamId: string, latestCompletedRound: number) {
-    const { data: teamsData, error: teamsErr } = await supabase.from("teams").select("id,team_name,total_points").eq("session_id", sessionId);
+    const { data: teamsData, error: teamsErr } = await supabase
+      .from("teams")
+      .select("id,team_name,total_points,total_ld_cr")
+      .eq("session_id", sessionId);
     if (teamsErr) throw teamsErr;
-    const teams = (teamsData ?? []) as Array<{ id: string; team_name: string; total_points: number | null }>;
+    const teams = (teamsData ?? []) as Array<{
+      id: string;
+      team_name: string;
+      total_points: number | null;
+      total_ld_cr: number | string | null;
+    }>;
     const totals = new Map(teams.map((row) => [row.id, row.total_points ?? 0]));
+    const ldTotals = new Map(teams.map((row) => [row.id, toNumber(row.total_ld_cr, 0)]));
     setTeamCount(teams.length);
     setPoints(totals.get(activeTeamId) ?? 0);
+    setTotalLdCr(ldTotals.get(activeTeamId) ?? 0);
 
-    let roundRows: Array<{ team_id: string; points_earned: number | null; schedule_index: number | null; cost_index: number | null; safety_score: number | null }> = [];
+    let roundRows: Array<{
+      team_id: string;
+      points_earned: number | null;
+      schedule_index: number | null;
+      cost_index: number | null;
+      safety_score: number | null;
+      stakeholder_score: number | null;
+      ld_triggered: boolean | null;
+      ld_capped: boolean | null;
+    }> = [];
     if (latestCompletedRound > 0) {
-      const { data, error: roundErr } = await supabase.from("team_results").select("team_id,points_earned,schedule_index,cost_index,safety_score").eq("session_id", sessionId).eq("round_number", latestCompletedRound);
+      const { data, error: roundErr } = await supabase
+        .from("team_results")
+        .select("team_id,points_earned,schedule_index,cost_index,safety_score,stakeholder_score,ld_triggered,ld_capped")
+        .eq("session_id", sessionId)
+        .eq("round_number", latestCompletedRound);
       if (roundErr) throw roundErr;
       roundRows = data ?? [];
     }
 
     const roundPoints = new Map<string, number>();
-    let metrics: PreviousMetrics = { spi: null, cpi: null, safety: null, points: null };
+    let metrics: PreviousMetrics = {
+      spi: null,
+      cpi: null,
+      safety: null,
+      stakeholder: null,
+      points: null,
+      ldTriggered: false,
+      ldCapped: false,
+    };
     for (const row of roundRows) {
       roundPoints.set(row.team_id, row.points_earned ?? 0);
-      if (row.team_id === activeTeamId) metrics = { spi: row.schedule_index ?? null, cpi: row.cost_index ?? null, safety: row.safety_score ?? null, points: row.points_earned ?? null };
+      if (row.team_id === activeTeamId) {
+        metrics = {
+          spi: row.schedule_index ?? null,
+          cpi: row.cost_index ?? null,
+          safety: row.safety_score ?? null,
+          stakeholder: row.stakeholder_score ?? null,
+          points: row.points_earned ?? null,
+          ldTriggered: Boolean(row.ld_triggered),
+          ldCapped: Boolean(row.ld_capped),
+        };
+      }
     }
 
     const currentRanked = [...teams].sort((a, b) => (b.total_points ?? 0) - (a.total_points ?? 0));
@@ -237,7 +328,11 @@ export default function SessionPage() {
       if (membershipErr) return void (setError(membershipErr.message), setLoading(false));
 
       const teamIds = ((membershipsData ?? []) as MembershipRow[]).map((row) => row.team_id);
-      const { data: teamsData, error: teamsErr } = await supabase.from("teams").select("id, team_name, session_id, total_points, kpi_target, identity_profile, identity_completed, scenario_id").in("id", teamIds).eq("session_id", sessionId);
+      const { data: teamsData, error: teamsErr } = await supabase
+        .from("teams")
+        .select("id, team_name, session_id, total_points, total_ld_cr, kpi_target, identity_profile, identity_completed, scenario_id")
+        .in("id", teamIds)
+        .eq("session_id", sessionId);
       if (teamsErr) return void (setError(teamsErr.message), setLoading(false));
 
       const myTeam = ((teamsData ?? []) as TeamRow[])[0];
@@ -245,11 +340,20 @@ export default function SessionPage() {
 
       setTeamId(myTeam.id);
       setTeamName(myTeam.team_name ?? "");
+      setTeamIdentityProfile(myTeam.identity_profile ?? {});
       setPoints(myTeam.total_points ?? 0);
+      setTotalLdCr(toNumber(myTeam.total_ld_cr, 0));
       setTeamKpi(resolvePrimaryKpi(myTeam));
       if (!myTeam.identity_completed && !isSessionCompleted(session.status)) return void router.replace(`/sessions/${sessionId}/identity`);
 
-      const { data: lastResultData, error: resultErr } = await supabase.from("team_results").select("round_number").eq("session_id", sessionId).eq("team_id", myTeam.id).order("round_number", { ascending: false }).limit(1).maybeSingle();
+      const { data: lastResultData, error: resultErr } = await supabase
+        .from("team_results")
+        .select("round_number,ld_capped")
+        .eq("session_id", sessionId)
+        .eq("team_id", myTeam.id)
+        .order("round_number", { ascending: false })
+        .limit(1)
+        .maybeSingle();
       if (resultErr) return void (setError(resultErr.message), setLoading(false));
 
       const completed = (lastResultData as TeamResultRow | null)?.round_number ?? 0;
@@ -354,10 +458,28 @@ export default function SessionPage() {
     const roundRow = (roundData as SessionRoundRow | null) ?? null;
     const deadlineIso = roundRow?.deadline_at ?? roundDeadlineIso ?? closeIso;
     const events = parseRoundEvents(roundRow?.news_payload) ?? (roundShocks.length > 0 ? roundShocks : getRoundConstructionEvents(sessionId, nextRound));
-    const { data: teamsData, error: teamsErr } = await supabase.from("teams").select("id,kpi_target").eq("session_id", sessionId);
+    const { data: teamsData, error: teamsErr } = await supabase
+      .from("teams")
+      .select("id,kpi_target,scenario_id")
+      .eq("session_id", sessionId);
     if (teamsErr) throw teamsErr;
 
     const teams = (teamsData ?? []) as SessionTeamRow[];
+    const scenarioIds = [...new Set(teams.map((team) => team.scenario_id).filter((value): value is string => Boolean(value)))];
+    let scenarioBudgetMap = new Map<string, number>();
+
+    if (scenarioIds.length > 0) {
+      const { data: scenariosData, error: scenariosErr } = await supabase
+        .from("project_scenarios")
+        .select("id,base_budget_cr")
+        .in("id", scenarioIds);
+
+      if (scenariosErr) throw scenariosErr;
+      scenarioBudgetMap = new Map(
+        ((scenariosData ?? []) as ScenarioBudgetRow[]).map((row) => [row.id, toNumber(row.base_budget_cr, 0)])
+      );
+    }
+
     let autoLockedTeams = 0;
     let generatedResults = 0;
     let preservedLockedTeams = 0;
@@ -412,18 +534,46 @@ export default function SessionPage() {
       let prevProfile: DecisionProfile | null = null;
 
       if (nextRound > 1) {
-        const { data: prevResultData, error: prevResultErr } = await supabase.from("team_results").select("schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,detail").eq("session_id", sessionId).eq("team_id", activeTeamId).eq("round_number", nextRound - 1).maybeSingle();
+        const { data: prevResultData, error: prevResultErr } = await supabase
+          .from("team_results")
+          .select("schedule_index,cost_index,cash_closing,quality_score,safety_score,stakeholder_score,claim_entitlement_score,points_earned,penalties,ld_triggered,ld_amount_cr,ld_cumulative_cr,ld_weeks,ld_capped,detail")
+          .eq("session_id", sessionId)
+          .eq("team_id", activeTeamId)
+          .eq("round_number", nextRound - 1)
+          .maybeSingle();
         if (prevResultErr) throw prevResultErr;
         if (prevResultData) {
           const prevRow = prevResultData as TeamResultFullRow;
-          prevResult = { schedule_index: prevRow.schedule_index, cost_index: prevRow.cost_index, cash_closing: prevRow.cash_closing, quality_score: prevRow.quality_score, safety_score: prevRow.safety_score, stakeholder_score: prevRow.stakeholder_score, claim_entitlement_score: prevRow.claim_entitlement_score, points_earned: prevRow.points_earned, penalties: prevRow.penalties, detail: prevRow.detail ?? {} };
+          prevResult = {
+            schedule_index: toNumber(prevRow.schedule_index, 0),
+            cost_index: toNumber(prevRow.cost_index, 0),
+            cash_closing: toNumber(prevRow.cash_closing, 0),
+            quality_score: toNumber(prevRow.quality_score, 0),
+            safety_score: toNumber(prevRow.safety_score, 0),
+            stakeholder_score: toNumber(prevRow.stakeholder_score, 0),
+            claim_entitlement_score: toNumber(prevRow.claim_entitlement_score, 0),
+            points_earned: toNumber(prevRow.points_earned, 0),
+            penalties: toNumber(prevRow.penalties, 0),
+            ld_triggered: Boolean(prevRow.ld_triggered),
+            ld_amount_cr: toNumber(prevRow.ld_amount_cr, 0),
+            ld_cumulative_cr: toNumber(prevRow.ld_cumulative_cr, 0),
+            ld_weeks: toNumber(prevRow.ld_weeks, 0),
+            ld_capped: Boolean(prevRow.ld_capped),
+            detail: prevRow.detail ?? {},
+          };
         }
         const { data: prevDecisionRawData, error: prevDecisionRawErr } = await supabase.from("decisions").select("raw").eq("session_id", sessionId).eq("team_id", activeTeamId).eq("round_number", nextRound - 1).maybeSingle();
         if (prevDecisionRawErr) throw prevDecisionRawErr;
         prevProfile = parseDecisionProfile((prevDecisionRawData as { raw?: Record<string, unknown> | null } | null)?.raw ?? null);
       }
 
-      const computed = computeRoundResultV2(decision, sessionId + ":" + activeTeamId + ":" + nextRound, { profile, prevResult, prevProfile, events });
+      const computed = computeRoundResultV2(decision, sessionId + ":" + activeTeamId + ":" + nextRound, {
+        profile,
+        prevResult,
+        prevProfile,
+        events,
+        baseBudgetCr: team.scenario_id ? scenarioBudgetMap.get(team.scenario_id) ?? 0 : 0,
+      });
       const kpiTarget = parseKpiTarget(team.kpi_target);
       const kpiEval = evaluateKpiAchievement(kpiTarget, computed);
       const boostedPoints = applyKpiMultiplier(computed.points_earned, kpiEval.achieved);
@@ -459,18 +609,37 @@ export default function SessionPage() {
         claim_entitlement_score: finalResult.claim_entitlement_score,
         points_earned: finalResult.points_earned,
         penalties: finalResult.penalties,
+        ld_triggered: finalResult.ld_triggered,
+        ld_amount_cr: finalResult.ld_amount_cr,
+        ld_cumulative_cr: finalResult.ld_cumulative_cr,
+        ld_weeks: finalResult.ld_weeks,
+        ld_capped: finalResult.ld_capped,
         detail: finalResult.detail,
       }, { onConflict: "session_id,team_id,round_number" });
       if (resultErr) throw resultErr;
       generatedResults += 1;
     }
 
-    const { data: scoreRowsData, error: scoreErr } = await supabase.from("team_results").select("team_id,points_earned").eq("session_id", sessionId);
+    const { data: scoreRowsData, error: scoreErr } = await supabase
+      .from("team_results")
+      .select("team_id,round_number,points_earned,ld_cumulative_cr")
+      .eq("session_id", sessionId)
+      .order("round_number", { ascending: true });
     if (scoreErr) throw scoreErr;
     const totals = new Map<string, number>();
-    for (const row of (scoreRowsData ?? []) as TeamScoreRow[]) totals.set(row.team_id, (totals.get(row.team_id) ?? 0) + (row.points_earned ?? 0));
+    const latestLdTotals = new Map<string, number>();
+    for (const row of (scoreRowsData ?? []) as TeamScoreRow[]) {
+      totals.set(row.team_id, (totals.get(row.team_id) ?? 0) + (row.points_earned ?? 0));
+      latestLdTotals.set(row.team_id, toNumber(row.ld_cumulative_cr, 0));
+    }
     for (const team of teams) {
-      const { error: totalErr } = await supabase.from("teams").update({ total_points: totals.get(team.id) ?? 0 }).eq("id", team.id);
+      const { error: totalErr } = await supabase
+        .from("teams")
+        .update({
+          total_points: totals.get(team.id) ?? 0,
+          total_ld_cr: latestLdTotals.get(team.id) ?? 0,
+        })
+        .eq("id", team.id);
       if (totalErr) throw totalErr;
     }
 
@@ -565,6 +734,22 @@ export default function SessionPage() {
   }
 
   const currentTeamEntry = leaderboard.find((entry) => entry.id === teamId) ?? null;
+  const ldStatusBadge =
+    previousMetrics.ldCapped ? (
+      <Badge
+        tone="success"
+        className="border-emerald-400/20 bg-emerald-500/15 text-emerald-100"
+      >
+        LD Capped
+      </Badge>
+    ) : totalLdCr > 0 ? (
+      <Badge
+        tone="warning"
+        className="border-amber-300/30 bg-amber-400/15 text-amber-100"
+      >
+        LD: ₹{formatCrores(totalLdCr)}Cr
+      </Badge>
+    ) : null;
   const displayRound = isComplete ? Math.max(roundCount, 1) : Math.max(nextRound, 1);
   const activeTimer = roundStatus === "open" && msLeft !== null ? formatClock(msLeft) : "00:00";
   const roundTitle = isComplete ? "Simulation complete" : roundStatus === "open" ? `Round ${displayRound} is Open` : roundStatus === "closed" ? "Round closed - results being calculated" : "Waiting for facilitator to open round";
@@ -579,8 +764,43 @@ export default function SessionPage() {
   const metricTone = (value: number | null, threshold: number) => (value === null ? "neutral" : value >= threshold ? "success" : "danger") as "neutral" | "success" | "danger";
   const pointsTone = (value: number | null) => (value === null ? "neutral" : value >= 0 ? "success" : "danger") as "neutral" | "success" | "danger";
   const metricValue = (value: number | null, decimals = 0) => value === null ? "—" : decimals > 0 ? value.toFixed(decimals) : Math.round(value).toString();
+  const inboxMessages = useMemo(
+    () =>
+      generateProjectInboxMessages({
+        sessionId,
+        roundNumber: displayRound,
+        clientName: scenarioClient,
+        companyName: teamIdentityProfile.company_name?.trim() || teamName,
+        identityProfile: {
+          ...teamIdentityProfile,
+          scenario_name: scenarioName,
+        },
+        previousRound: {
+          spi: previousMetrics.spi,
+          cpi: previousMetrics.cpi,
+          safety: previousMetrics.safety,
+          stakeholder: previousMetrics.stakeholder,
+          ld_triggered: previousMetrics.ldTriggered,
+        },
+      }),
+    [
+      displayRound,
+      previousMetrics.cpi,
+      previousMetrics.ldTriggered,
+      previousMetrics.safety,
+      previousMetrics.spi,
+      previousMetrics.stakeholder,
+      scenarioClient,
+      scenarioName,
+      sessionId,
+      teamIdentityProfile,
+      teamName,
+    ]
+  );
+  const urgentInboxPreview = inboxMessages.filter((message) => message.type === "urgent").slice(0, 2);
 
   const scenarioHeroImageUrl = getScenarioHeroImageUrl(scenarioName);
+  const scenarioFamily = getScenarioFamily(scenarioName);
   return (
     <RequireAuth>
       <Page>
@@ -634,7 +854,10 @@ export default function SessionPage() {
                   </div>
                   <div className="flex flex-col gap-3 lg:items-end">
                     <div className="text-heading-3 text-slate-50">{teamName}</div>
-                    <Badge tone="info">Rank {currentTeamEntry?.currentRank ?? 1} of {Math.max(teamCount, 1)}</Badge>
+                    <div className="flex flex-wrap gap-2 lg:justify-end">
+                      <Badge tone="info">Rank {currentTeamEntry?.currentRank ?? 1} of {Math.max(teamCount, 1)}</Badge>
+                      {ldStatusBadge}
+                    </div>
                     <div className="text-sm text-slate-300">Primary KPI: {teamKpi}</div>
                   </div>
                 </CardBody>
@@ -652,6 +875,16 @@ export default function SessionPage() {
                         <div className="text-heading-2 text-slate-50">{roundTitle}</div>
                         <p className="mt-3 max-w-3xl text-body text-slate-300">{roundSubtitle}</p>
                       </div>
+                      <div className="max-w-[360px]">
+                        <SiteProgressVisual
+                          scenarioType={scenarioFamily}
+                          currentRound={displayRound}
+                          totalRounds={Math.max(roundCount, 1)}
+                          spi={previousMetrics.spi ?? 1}
+                          safety={previousMetrics.safety ?? 100}
+                          hasIncident={(previousMetrics.safety ?? 100) < 75}
+                        />
+                      </div>
                     </div>
                     <div className="min-w-[220px] rounded-[24px] border border-amber-400/20 bg-slate-900/90 px-6 py-5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
                       <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-amber-200">Countdown</div>
@@ -660,9 +893,17 @@ export default function SessionPage() {
                     </div>
                   </div>
                   <div className="flex flex-col gap-3 sm:flex-row">
-                    <Link href={`/sessions/${sessionId}/round/${displayRound}`} className="block">
-                      <Button className="w-full rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 hover:from-amber-300 hover:to-orange-400">Enter Round Workspace</Button>
-                    </Link>
+                    {isComplete ? (
+                      <Link href={`/sessions/${sessionId}/debrief`} className="block">
+                        <Button className="w-full rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 hover:from-amber-300 hover:to-orange-400">
+                          View Project Debrief
+                        </Button>
+                      </Link>
+                    ) : (
+                      <Link href={`/sessions/${sessionId}/round/${displayRound}`} className="block">
+                        <Button className="w-full rounded-2xl border-amber-300/20 bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 hover:from-amber-300 hover:to-orange-400">Enter Round Workspace</Button>
+                      </Link>
+                    )}
                     <Link href={`/sessions/${sessionId}/report`} className="block">
                       <Button variant="ghost" className="w-full rounded-2xl border border-slate-700 bg-slate-900 text-slate-100 hover:border-slate-600 hover:bg-slate-800 hover:text-white">View Report</Button>
                     </Link>
@@ -670,6 +911,49 @@ export default function SessionPage() {
                   </div>
                 </CardBody>
               </Card>
+
+              {!isComplete ? (
+                <Card variant="elevated" className="border-rose-300/20 bg-gradient-to-br from-rose-500/10 via-slate-950 to-slate-950">
+                  <CardBody className="space-y-5 p-6">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div>
+                        <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-rose-200">Site Inbox — Action Required</div>
+                        <div className="mt-2 text-heading-3 text-white">Incoming project pressure before round {displayRound}</div>
+                        <p className="mt-2 max-w-3xl text-sm text-slate-300">
+                          The inbox regenerates from your last round performance and team positioning, so urgent threads start stacking before the next decision window feels comfortable.
+                        </p>
+                      </div>
+                      <Link href={`/sessions/${sessionId}/round/${displayRound}`} className="text-sm font-semibold text-amber-200 transition hover:text-amber-100">
+                        Open Inbox →
+                      </Link>
+                    </div>
+
+                    {urgentInboxPreview.length > 0 ? (
+                      <div className="grid gap-4 lg:grid-cols-2">
+                        {urgentInboxPreview.map((message) => (
+                          <div key={message.id} className="rounded-2xl border border-rose-400/20 bg-slate-950/60 px-5 py-4">
+                            <div className="flex items-center gap-2">
+                              <Badge className="border-rose-400/20 bg-rose-500/10 text-rose-100">Urgent</Badge>
+                              {message.requires_response ? (
+                                <Badge className="border-white/10 bg-white/5 text-slate-100">Response needed</Badge>
+                              ) : null}
+                            </div>
+                            <div className="mt-3 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">{message.from}</div>
+                            <div className="mt-2 text-base font-black text-white">{message.icon} {message.subject}</div>
+                            <div className="mt-3 text-sm leading-6 text-slate-300">{message.body}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="rounded-2xl border border-white/10 bg-white/5 px-5 py-4 text-sm text-slate-300">
+                        No urgent inbox threads are live right now, but the site desk is still filling with info and opportunity messages for round {displayRound}.
+                      </div>
+                    )}
+                  </CardBody>
+                </Card>
+              ) : null}
+
+              <CompetitorIntelFeed sessionId={sessionId} teamId={teamId} roundNumber={displayRound} />
 
               <div className="grid gap-4 md:grid-cols-4">
                 <MetricTile label="SPI" value={metricValue(previousMetrics.spi, 2)} helper="Last round schedule index" tone={metricTone(previousMetrics.spi, 1)} />

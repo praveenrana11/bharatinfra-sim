@@ -20,6 +20,11 @@ export type SecureRoundResultRow = {
   claim_entitlement_score: number;
   points_earned: number;
   penalties: number;
+  ld_triggered: boolean;
+  ld_amount_cr: number;
+  ld_cumulative_cr: number;
+  ld_weeks: number;
+  ld_capped: boolean;
   detail: Record<string, unknown>;
 };
 

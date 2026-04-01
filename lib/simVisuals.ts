@@ -14,13 +14,25 @@ const EVENT_IMAGES = {
     "https://images.pexels.com/photos/159306/construction-site-build-construction-work-159306.jpeg",
 } as const;
 
-export function getScenarioTypeLabel(name: string | null | undefined) {
+export type ScenarioFamily = "metro" | "airport" | "industrial" | "highway";
+
+export function getScenarioFamily(name: string | null | undefined): ScenarioFamily {
   const lower = (name ?? "").toLowerCase();
 
-  if (lower.includes("metro")) return "Metro Rail";
-  if (lower.includes("airport")) return "Airport Terminal";
-  if (lower.includes("industrial") || lower.includes("plant")) return "Industrial Plant";
-  if (lower.includes("highway") || lower.includes("road")) return "Highway Package";
+  if (lower.includes("metro")) return "metro";
+  if (lower.includes("airport")) return "airport";
+  if (lower.includes("industrial") || lower.includes("plant")) return "industrial";
+  if (lower.includes("highway") || lower.includes("road")) return "highway";
+
+  return "highway";
+}
+
+export function getScenarioTypeLabel(name: string | null | undefined) {
+  const family = getScenarioFamily(name);
+
+  if (family === "metro") return "Metro Rail";
+  if (family === "airport") return "Airport Terminal";
+  if (family === "industrial") return "Industrial Plant";
 
   return "Highway Package";
 }

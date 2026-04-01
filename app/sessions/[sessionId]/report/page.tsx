@@ -2152,6 +2152,9 @@ export default function SessionFinancialReportPage() {
             <Link className="underline text-slate-700" href={`/sessions/${sessionId}`}>
               Session Hub
             </Link>
+            <Link className="underline text-slate-700" href={`/sessions/${sessionId}/debrief`}>
+              Full Project Debrief -&gt;
+            </Link>
             {session?.current_round ? (
               <Link className="underline text-slate-700" href={`/sessions/${sessionId}/round/${session.current_round}/results`}>
                 Latest Results

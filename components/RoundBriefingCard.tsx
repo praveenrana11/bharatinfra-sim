@@ -2,8 +2,14 @@
 
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 
+import SiteProgressVisual from "@/components/SiteProgressVisual";
+import {
+  DEFAULT_CARRYOVER_STATE,
+  getCarryoverRiskIndicators,
+  parseCarryoverState,
+} from "@/lib/consequenceEngine";
 import { parseConstructionEvents } from "@/lib/newsPayload";
-import { getScenarioHeroImageUrl } from "@/lib/simVisuals";
+import { getScenarioFamily, getScenarioHeroImageUrl, type ScenarioFamily } from "@/lib/simVisuals";
 import { getSupabaseClient } from "@/lib/supabaseClient";
 
 type RoundBriefingCardProps = {
@@ -31,6 +37,7 @@ type PreviousResultRow = {
   cost_index: number | null;
   safety_score: number | null;
   stakeholder_score: number | null;
+  carryover_state: unknown;
 };
 
 type SessionRoundRow = {
@@ -40,12 +47,14 @@ type SessionRoundRow = {
 type BriefingState = {
   projectName: string;
   client: string;
+  scenarioFamily: ScenarioFamily;
   totalRounds: number;
   baseBudgetCr: number | null;
   totalPoints: number;
   rank: number;
   totalTeams: number;
   previousResult: PreviousResultRow | null;
+  carryoverState: typeof DEFAULT_CARRYOVER_STATE;
   eventTitle: string;
   eventDescription: string;
   positioningStrategy: string;
@@ -57,12 +66,14 @@ type Tone = "good" | "warning" | "danger" | "neutral";
 const DEFAULT_STATE: BriefingState = {
   projectName: "Project Scenario",
   client: "Client",
+  scenarioFamily: "highway",
   totalRounds: 4,
   baseBudgetCr: null,
   totalPoints: 0,
   rank: 1,
   totalTeams: 0,
   previousResult: null,
+  carryoverState: DEFAULT_CARRYOVER_STATE,
   eventTitle: "",
   eventDescription: "",
   positioningStrategy: "Not selected",
@@ -153,6 +164,12 @@ function stakeholderTone(score: number): Tone {
   if (score < 65) return "danger";
   if (score < 80) return "warning";
   return "good";
+}
+
+function indicatorClasses(tone: Tone) {
+  if (tone === "danger") return "border-rose-400/30 bg-rose-500/15 text-rose-50";
+  if (tone === "warning") return "border-amber-400/30 bg-amber-500/15 text-amber-50";
+  return "border-emerald-400/30 bg-emerald-500/15 text-emerald-50";
 }
 
 function formatBudgetStatus(cpi: number) {
@@ -343,7 +360,7 @@ export default function RoundBriefingCard({
         roundNumber > 1
           ? supabase
               .from("team_results")
-              .select("schedule_index,cost_index,safety_score,stakeholder_score")
+              .select("schedule_index,cost_index,safety_score,stakeholder_score,carryover_state")
               .eq("session_id", sessionId)
               .eq("team_id", teamId)
               .eq("round_number", roundNumber - 1)
@@ -389,12 +406,14 @@ export default function RoundBriefingCard({
       const nextState: BriefingState = {
         projectName: toText(scenario?.name, DEFAULT_STATE.projectName),
         client: toText(scenario?.client, DEFAULT_STATE.client),
+        scenarioFamily: getScenarioFamily(scenario?.name),
         totalRounds: Math.max(scenario?.duration_rounds ?? DEFAULT_STATE.totalRounds, roundNumber),
         baseBudgetCr: toNumber(scenario?.base_budget_cr),
         totalPoints,
         rank: Math.max((higherTeamsResult.count ?? 0) + 1, 1),
         totalTeams: totalTeamsResult.count ?? 0,
         previousResult: previousRound,
+        carryoverState: parseCarryoverState(previousRound?.carryover_state),
         eventTitle: activeEvent?.title ?? "",
         eventDescription: activeEvent?.description ?? "",
         positioningStrategy: toText(identityProfile.positioning_strategy, "Not selected"),
@@ -467,6 +486,7 @@ export default function RoundBriefingCard({
         helper: "Stakeholder score",
         tone: stakeholderTone(state.previousResult?.stakeholder_score ?? 0),
       };
+  const riskIndicators = getCarryoverRiskIndicators(state.carryoverState);
 
   return (
     <section className="glass-panel overflow-hidden rounded-[28px] border border-white/10 shadow-[0_24px_70px_rgba(15,23,42,0.45)]">
@@ -544,6 +564,31 @@ export default function RoundBriefingCard({
             helper={stakeholderTile.helper}
             tone={stakeholderTile.tone}
             icon={<PeopleIcon />}
+          />
+        </div>
+
+        <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/45 px-4 py-4">
+          <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-400">Risk Indicators</div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {riskIndicators.map((indicator) => (
+              <span
+                key={indicator.key}
+                className={`inline-flex rounded-full border px-3 py-1.5 text-xs font-semibold ${indicatorClasses(indicator.tone)}`}
+              >
+                {indicator.label}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-4 border-t border-white/10 pt-4">
+          <SiteProgressVisual
+            scenarioType={state.scenarioFamily}
+            currentRound={roundNumber}
+            totalRounds={state.totalRounds}
+            spi={isBaseline ? 1 : state.previousResult?.schedule_index ?? 1}
+            safety={isBaseline ? 100 : state.previousResult?.safety_score ?? 100}
+            hasIncident={!isBaseline && (state.previousResult?.safety_score ?? 100) < 75}
           />
         </div>
 
