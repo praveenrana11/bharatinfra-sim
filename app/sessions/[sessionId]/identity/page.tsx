@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import RequireAuth from "@/components/RequireAuth";
@@ -77,6 +77,12 @@ type KpiOption = {
   title: string;
   description: string;
   icon: string;
+};
+
+type StepZeroValidationErrors = {
+  companyName?: string;
+  tagline?: string;
+  roles?: string;
 };
 
 const STEP_TITLES = [
@@ -257,6 +263,139 @@ function StepRail({ currentStep }: { currentStep: StepIndex }) {
   );
 }
 
+const RoleAssignmentRow = memo(function RoleAssignmentRow({
+  member,
+  selectedRole,
+  onRoleChange,
+}: {
+  member: TeamMemberOption;
+  selectedRole: TeamMemberRole | "";
+  onRoleChange: (memberKey: string, value: TeamMemberRole | "") => void;
+}) {
+  const handleChange = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>) => {
+      onRoleChange(member.key, event.target.value as TeamMemberRole | "");
+    },
+    [member.key, onRoleChange]
+  );
+
+  return (
+    <div className="grid gap-3 rounded-2xl border border-white/10 bg-slate-950/70 p-4 md:grid-cols-[minmax(0,1fr)_220px]">
+      <div className="min-w-0">
+        <div className="text-sm font-semibold text-white">{member.label}</div>
+        <div className="mt-1 text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">
+          {selectedRole ? getRoleName(selectedRole) : "Role pending"}
+        </div>
+      </div>
+
+      <select
+        value={selectedRole}
+        onChange={handleChange}
+        className="h-11 rounded-2xl border border-white/10 bg-white/5 px-4 text-sm font-semibold text-white outline-none transition focus:border-amber-400/40 focus:bg-white/10"
+      >
+        <option value="" className="bg-slate-950">
+          Select role
+        </option>
+        {TEAM_MEMBER_ROLES.map((role) => (
+          <option key={`${member.key}-${role}`} value={role} className="bg-slate-950">
+            {getRoleName(role)}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+});
+
+const KpiSelectionCard = memo(function KpiSelectionCard({
+  option,
+  selected,
+  primary,
+  limitReached,
+  onToggle,
+}: {
+  option: KpiOption;
+  selected: boolean;
+  primary: boolean;
+  limitReached: boolean;
+  onToggle: (value: string) => void;
+}) {
+  const handleClick = useCallback(() => {
+    if (limitReached) return;
+    onToggle(option.title);
+  }, [limitReached, onToggle, option.title]);
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={limitReached}
+      className={`rounded-3xl border p-5 text-left transition focus:outline-none focus:ring-2 focus:ring-amber-400/40 ${
+        primary
+          ? "border-amber-300 bg-amber-500/10 shadow-[0_18px_45px_rgba(251,191,36,0.08)]"
+          : selected
+            ? "border-amber-400/40 bg-white/10 shadow-[0_18px_45px_rgba(251,191,36,0.08)]"
+            : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-white/5"
+      } ${limitReached ? "cursor-not-allowed opacity-60" : ""}`}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-2xl">
+          {option.icon}
+        </div>
+        <span
+          className={`rounded-full px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] ${
+            primary ? "bg-amber-400 text-white" : selected ? "bg-amber-500/15 text-amber-100" : "bg-white/5 text-slate-500"
+          }`}
+        >
+          {primary ? "Primary" : selected ? "Selected" : "Open"}
+        </span>
+      </div>
+
+      <div className="mt-6 text-lg font-bold text-white">{option.title}</div>
+      <div className="mt-2 text-sm text-slate-300">{option.description}</div>
+    </button>
+  );
+});
+
+const PrimaryKpiCard = memo(function PrimaryKpiCard({
+  option,
+  primary,
+  onSelect,
+}: {
+  option: KpiOption;
+  primary: boolean;
+  onSelect: (value: string) => void;
+}) {
+  const handleClick = useCallback(() => {
+    onSelect(option.title);
+  }, [onSelect, option.title]);
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      className={`rounded-3xl border p-5 text-left transition ${
+        primary
+          ? "border-yellow-300 bg-yellow-500/10 shadow-[0_18px_45px_rgba(250,204,21,0.12)]"
+          : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-white/5"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-2xl">
+          {option.icon}
+        </div>
+        {primary ? (
+          <span className="rounded-full border border-yellow-300/50 bg-yellow-400 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-slate-950">
+            {"\u2B50"} Primary - 4x points
+          </span>
+        ) : null}
+      </div>
+
+      <div className="mt-5 text-base font-black text-white">{option.title}</div>
+      <div className="mt-2 text-sm text-slate-300">{option.description}</div>
+    </button>
+  );
+});
+
 export default function SessionIdentityPage() {
   const params = useParams();
   const router = useRouter();
@@ -291,20 +430,57 @@ export default function SessionIdentityPage() {
   const [positioningStrategy, setPositioningStrategy] = useState<PositioningName | "">("");
   const [selectedKpis, setSelectedKpis] = useState<string[]>([]);
   const [primaryKpi, setPrimaryKpi] = useState("");
+  const [profileValidationAttempted, setProfileValidationAttempted] = useState(false);
 
-  const assignedRoles = memberOptions
-    .map((member) => memberRoleAssignments[member.key])
-    .filter((value): value is TeamMemberRole => Boolean(value));
-  const allMembersAssignedRole =
-    memberOptions.length > 0 && memberOptions.every((member) => Boolean(memberRoleAssignments[member.key]));
-  const uniqueRoleAssignments = new Set(assignedRoles).size === assignedRoles.length;
+  const trimmedCompanyName = useMemo(() => companyName.trim(), [companyName]);
+  const trimmedTagline = useMemo(() => tagline.trim(), [tagline]);
+  const assignedRoles = useMemo(
+    () =>
+      memberOptions
+        .map((member) => memberRoleAssignments[member.key])
+        .filter((value): value is TeamMemberRole => Boolean(value)),
+    [memberOptions, memberRoleAssignments]
+  );
+  const duplicateAssignedRoles = useMemo(() => {
+    const counts = new Map<TeamMemberRole, number>();
+    for (const role of assignedRoles) {
+      counts.set(role, (counts.get(role) ?? 0) + 1);
+    }
 
-  const stepCompletion = [
-    Boolean(companyName.trim()) && Boolean(tagline.trim()) && allMembersAssignedRole && uniqueRoleAssignments,
-    Boolean(selectedScenarioId),
-    Boolean(positioningStrategy),
-    selectedKpis.length === 3 && selectedKpis.includes(primaryKpi),
-  ];
+    return Array.from(counts.entries())
+      .filter(([, count]) => count > 1)
+      .map(([role]) => role);
+  }, [assignedRoles]);
+  const allMembersAssignedRole = useMemo(
+    () => memberOptions.length > 0 && memberOptions.every((member) => Boolean(memberRoleAssignments[member.key])),
+    [memberOptions, memberRoleAssignments]
+  );
+  const uniqueRoleAssignments = duplicateAssignedRoles.length === 0;
+
+  const stepZeroValidationErrors = useMemo<StepZeroValidationErrors>(() => {
+    const errors: StepZeroValidationErrors = {};
+
+    if (!trimmedCompanyName) errors.companyName = "Company name required.";
+    if (!trimmedTagline) errors.tagline = "Tagline required.";
+
+    if (!allMembersAssignedRole) {
+      errors.roles = "Assign a specialist role to every roster member.";
+    } else if (!uniqueRoleAssignments) {
+      errors.roles = "Roles must be unique.";
+    }
+
+    return errors;
+  }, [allMembersAssignedRole, trimmedCompanyName, trimmedTagline, uniqueRoleAssignments]);
+
+  const stepCompletion = useMemo(
+    () => [
+      Boolean(trimmedCompanyName) && Boolean(trimmedTagline) && allMembersAssignedRole && uniqueRoleAssignments,
+      Boolean(selectedScenarioId),
+      Boolean(positioningStrategy),
+      selectedKpis.length === 3 && selectedKpis.includes(primaryKpi),
+    ],
+    [allMembersAssignedRole, positioningStrategy, primaryKpi, selectedKpis, selectedScenarioId, trimmedCompanyName, trimmedTagline, uniqueRoleAssignments]
+  );
 
   useEffect(() => {
     (async () => {
@@ -432,6 +608,7 @@ export default function SessionIdentityPage() {
       setPositioningStrategy(profile.positioning_strategy ?? "");
       setSelectedKpis(profile.kpi_targets ?? []);
       setPrimaryKpi(profile.primary_kpi ?? "");
+      setProfileValidationAttempted(false);
       setStepIndex(resolveInitialStep(profile, team.scenario_id, roster.map((member) => member.key)));
       setIsSessionHost(session.created_by === user.id);
 
@@ -454,12 +631,75 @@ export default function SessionIdentityPage() {
     return () => window.clearTimeout(redirectTimer);
   }, [router, sessionId, showSuccessScreen]);
 
-  async function persistIdentityStep(
+  const clearSaveFeedback = useCallback(() => {
+    setSaveError("");
+    setSaveNotice("");
+  }, []);
+
+  const handleCompanyNameChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      clearSaveFeedback();
+      setCompanyName(event.target.value);
+    },
+    [clearSaveFeedback]
+  );
+
+  const handleTaglineChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      clearSaveFeedback();
+      setTagline(event.target.value);
+    },
+    [clearSaveFeedback]
+  );
+
+  const handleMemberRoleChange = useCallback(
+    (memberKey: string, value: TeamMemberRole | "") => {
+      clearSaveFeedback();
+      setMemberRoleAssignments((current) => {
+        if ((current[memberKey] ?? "") === value) return current;
+        return {
+          ...current,
+          [memberKey]: value,
+        };
+      });
+    },
+    [clearSaveFeedback]
+  );
+
+  const handleScenarioSelect = useCallback(
+    (scenarioId: string) => {
+      clearSaveFeedback();
+      setSelectedScenarioId((current) => (current === scenarioId ? current : scenarioId));
+    },
+    [clearSaveFeedback]
+  );
+
+  const handlePositioningSelect = useCallback(
+    (value: PositioningName) => {
+      clearSaveFeedback();
+      setPositioningStrategy((current) => (current === value ? current : value));
+    },
+    [clearSaveFeedback]
+  );
+
+  const handlePrimaryKpiSelect = useCallback(
+    (value: string) => {
+      clearSaveFeedback();
+      setPrimaryKpi((current) => (current === value ? current : value));
+    },
+    [clearSaveFeedback]
+  );
+
+  const handleBack = useCallback(() => {
+    setStepIndex((current) => Math.max(0, current - 1) as StepIndex);
+  }, []);
+
+  const persistIdentityStep = useCallback(async (
     profilePatch: Partial<IdentityProfile>,
     roleAssignmentsPatch?: Record<string, TeamMemberRole | "">,
     extraFields?: { scenario_id?: string; identity_completed?: boolean },
     successMessage?: string
-  ) {
+  ) => {
     if (!teamId) return false;
     setSaving(true);
     setSaveError("");
@@ -527,23 +767,27 @@ export default function SessionIdentityPage() {
       );
       setMemberRoleAssignments(roleAssignmentsPatch);
     }
+    setProfileValidationAttempted(false);
     if (successMessage) setSaveNotice(successMessage);
     setSaving(false);
     return true;
-  }
+  }, [identityProfile, memberOptions, memberRoleAssignments, supabase, teamId]);
 
-  async function handleContinue() {
+  const handleContinue = useCallback(async () => {
     if (stepIndex === 0) {
-      if (!stepCompletion[0]) {
+      setProfileValidationAttempted(true);
+
+      if (stepZeroValidationErrors.companyName || stepZeroValidationErrors.tagline || stepZeroValidationErrors.roles) {
         setSaveError(
-          allMembersAssignedRole
-            ? "Keep each specialist role unique while completing company profile and tagline."
-            : "Complete company profile, tagline, and assign a specialist role to every roster member."
+          stepZeroValidationErrors.roles ??
+            stepZeroValidationErrors.companyName ??
+            stepZeroValidationErrors.tagline ??
+            "Resolve the highlighted company profile fields."
         );
         return;
       }
       const saved = await persistIdentityStep(
-        { company_name: companyName.trim(), tagline: tagline.trim() },
+        { company_name: trimmedCompanyName, tagline: trimmedTagline },
         memberRoleAssignments,
         undefined,
         "Company profile saved."
@@ -577,7 +821,7 @@ export default function SessionIdentityPage() {
       return;
     }
 
-    if (!stepCompletion[3]) {
+    if (selectedKpis.length !== 3 || !selectedKpis.includes(primaryKpi)) {
       setSaveError("Select exactly three KPI targets and mark one of them as primary.");
       return;
     }
@@ -589,9 +833,20 @@ export default function SessionIdentityPage() {
       "Identity locked in."
     );
     if (saved) setShowSuccessScreen(true);
-  }
+  }, [
+    memberRoleAssignments,
+    persistIdentityStep,
+    positioningStrategy,
+    primaryKpi,
+    selectedKpis,
+    selectedScenarioId,
+    stepIndex,
+    stepZeroValidationErrors,
+    trimmedCompanyName,
+    trimmedTagline,
+  ]);
 
-  async function handleResetIdentity() {
+  const handleResetIdentity = useCallback(async () => {
     if (!isSessionHost || !teamId) return;
 
     setResettingIdentity(true);
@@ -621,26 +876,37 @@ export default function SessionIdentityPage() {
     }
 
     window.location.reload();
-  }
+  }, [isSessionHost, supabase, teamId]);
 
-  function toggleKpi(value: string) {
-    setSaveError("");
-    setSaveNotice("");
+  const toggleKpi = useCallback((value: string) => {
+    clearSaveFeedback();
     setSelectedKpis((current) => {
       if (current.includes(value)) {
         const next = current.filter((item) => item !== value);
-        if (primaryKpi === value) setPrimaryKpi("");
+        setPrimaryKpi((currentPrimary) => (currentPrimary === value ? "" : currentPrimary));
         return next;
       }
       if (current.length >= 3) return current;
       return [...current, value];
     });
-  }
+  }, [clearSaveFeedback]);
 
-  const selectedScenario = scenarios.find((scenario) => scenario.id === selectedScenarioId) ?? null;
-  const selectedScenarioType = selectedScenario ? getScenarioTypeMeta(selectedScenario.name) : null;
-  const selectedPositioningOption = POSITIONING_OPTIONS.find((option) => option.value === positioningStrategy) ?? null;
-  const selectedKpiOptions = KPI_OPTIONS.filter((option) => selectedKpis.includes(option.title));
+  const selectedScenario = useMemo(
+    () => scenarios.find((scenario) => scenario.id === selectedScenarioId) ?? null,
+    [scenarios, selectedScenarioId]
+  );
+  const selectedScenarioType = useMemo(
+    () => (selectedScenario ? getScenarioTypeMeta(selectedScenario.name) : null),
+    [selectedScenario]
+  );
+  const selectedPositioningOption = useMemo(
+    () => POSITIONING_OPTIONS.find((option) => option.value === positioningStrategy) ?? null,
+    [positioningStrategy]
+  );
+  const selectedKpiOptions = useMemo(
+    () => KPI_OPTIONS.filter((option) => selectedKpis.includes(option.title)),
+    [selectedKpis]
+  );
 
   if (loading) {
     return (
@@ -762,19 +1028,27 @@ export default function SessionIdentityPage() {
                                 <span className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">Company Name</span>
                                 <Input
                                   value={companyName}
-                                  onChange={(event) => setCompanyName(event.target.value)}
+                                  onChange={handleCompanyNameChange}
                                   placeholder="Apex Infrastructure Pvt. Ltd."
-                                  className="mt-3 h-12 rounded-2xl border-white/10 bg-white/5 px-4 text-base"
+                                  className="mt-3 h-12 rounded-2xl border-white/10 bg-white/5 px-4 text-base text-white placeholder:text-slate-500"
                                 />
+                                {profileValidationAttempted && stepZeroValidationErrors.companyName ? (
+                                  <div className="mt-2 text-sm font-medium text-rose-200">
+                                    {stepZeroValidationErrors.companyName}
+                                  </div>
+                                ) : null}
                               </label>
                               <label className="block">
                                 <span className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">Tagline</span>
                                 <Input
                                   value={tagline}
-                                  onChange={(event) => setTagline(event.target.value)}
+                                  onChange={handleTaglineChange}
                                   placeholder="Precision delivery at corridor scale."
-                                  className="mt-3 h-12 rounded-2xl border-white/10 bg-white/5 px-4 text-base"
+                                  className="mt-3 h-12 rounded-2xl border-white/10 bg-white/5 px-4 text-base text-white placeholder:text-slate-500"
                                 />
+                                {profileValidationAttempted && stepZeroValidationErrors.tagline ? (
+                                  <div className="mt-2 text-sm font-medium text-rose-200">{stepZeroValidationErrors.tagline}</div>
+                                ) : null}
                               </label>
                             </div>
 
@@ -788,41 +1062,20 @@ export default function SessionIdentityPage() {
 
                               <div className="mt-5 grid gap-4">
                                 {memberOptions.map((member) => (
-                                  <div
+                                  <RoleAssignmentRow
                                     key={member.key}
-                                    className="grid gap-3 rounded-2xl border border-white/10 bg-slate-950/70 p-4 md:grid-cols-[minmax(0,1fr)_220px]"
-                                  >
-                                    <div className="min-w-0">
-                                      <div className="text-sm font-semibold text-white">{member.label}</div>
-                                      <div className="mt-1 text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">
-                                        {memberRoleAssignments[member.key]
-                                          ? getRoleName(memberRoleAssignments[member.key] as TeamMemberRole)
-                                          : "Role pending"}
-                                      </div>
-                                    </div>
-
-                                    <select
-                                      value={memberRoleAssignments[member.key] ?? ""}
-                                      onChange={(event) =>
-                                        setMemberRoleAssignments((current) => ({
-                                          ...current,
-                                          [member.key]: event.target.value as TeamMemberRole | "",
-                                        }))
-                                      }
-                                      className="h-11 rounded-2xl border border-white/10 bg-white/5 px-4 text-sm font-semibold text-white outline-none transition focus:border-amber-400/40 focus:bg-white/10"
-                                    >
-                                      <option value="" className="bg-slate-950">
-                                        Select role
-                                      </option>
-                                      {TEAM_MEMBER_ROLES.map((role) => (
-                                        <option key={`${member.key}-${role}`} value={role} className="bg-slate-950">
-                                          {getRoleName(role)}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </div>
+                                    member={member}
+                                    selectedRole={memberRoleAssignments[member.key] ?? ""}
+                                    onRoleChange={handleMemberRoleChange}
+                                  />
                                 ))}
                               </div>
+
+                              {profileValidationAttempted && stepZeroValidationErrors.roles ? (
+                                <div className="mt-4 rounded-2xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                                  {stepZeroValidationErrors.roles}
+                                </div>
+                              ) : null}
                             </div>
                           </div>
 
@@ -875,7 +1128,7 @@ export default function SessionIdentityPage() {
                               <button
                                 key={scenario.id}
                                 type="button"
-                                onClick={() => setSelectedScenarioId(scenario.id)}
+                                onClick={() => handleScenarioSelect(scenario.id)}
                                 className={`relative overflow-hidden rounded-3xl border text-left transition ${
                                   selected
                                     ? "border-amber-300 bg-white/10 shadow-[0_24px_60px_rgba(251,191,36,0.16)]"
@@ -943,7 +1196,7 @@ export default function SessionIdentityPage() {
                               <button
                                 key={option.value}
                                 type="button"
-                                onClick={() => setPositioningStrategy(option.value)}
+                                onClick={() => handlePositioningSelect(option.value)}
                                 className={`flex min-h-[320px] flex-col rounded-3xl border bg-gradient-to-b p-6 text-left transition ${
                                   selected
                                     ? "border-amber-300 shadow-[0_22px_50px_rgba(251,191,36,0.16)]"
@@ -1002,48 +1255,14 @@ export default function SessionIdentityPage() {
                             const limitReached = selectedKpis.length >= 3 && !selected;
 
                             return (
-                              <div
+                              <KpiSelectionCard
                                 key={option.title}
-                                role="button"
-                                tabIndex={0}
-                                onClick={() => {
-                                  if (limitReached) return;
-                                  toggleKpi(option.title);
-                                }}
-                                onKeyDown={(event) => {
-                                  if (event.key !== "Enter" && event.key !== " ") return;
-                                  event.preventDefault();
-                                  if (limitReached) return;
-                                  toggleKpi(option.title);
-                                }}
-                                className={`rounded-3xl border p-5 text-left transition focus:outline-none focus:ring-2 focus:ring-amber-400/40 ${
-                                  primary
-                                    ? "border-amber-300 bg-amber-500/10 shadow-[0_18px_45px_rgba(251,191,36,0.08)]"
-                                    : selected
-                                      ? "border-amber-400/40 bg-white/10 shadow-[0_18px_45px_rgba(251,191,36,0.08)]"
-                                      : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-white/5"
-                                } ${limitReached ? "opacity-60" : ""}`}
-                              >
-                                <div className="flex items-start justify-between gap-4">
-                                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-2xl">
-                                    {option.icon}
-                                  </div>
-                                  <span
-                                    className={`rounded-full px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] ${
-                                      primary
-                                        ? "bg-amber-400 text-white"
-                                        : selected
-                                          ? "bg-amber-500/15 text-amber-100"
-                                          : "bg-white/5 text-slate-500"
-                                    }`}
-                                  >
-                                    {primary ? "Primary" : selected ? "Selected" : "Open"}
-                                  </span>
-                                </div>
-
-                                <div className="mt-6 text-lg font-bold text-white">{option.title}</div>
-                                <div className="mt-2 text-sm text-slate-300">{option.description}</div>
-                              </div>
+                                option={option}
+                                selected={selected}
+                                primary={primary}
+                                limitReached={limitReached}
+                                onToggle={toggleKpi}
+                              />
                             );
                           })}
                         </div>
@@ -1069,30 +1288,12 @@ export default function SessionIdentityPage() {
                                 const primary = primaryKpi === option.title;
 
                                 return (
-                                  <button
+                                  <PrimaryKpiCard
                                     key={option.title}
-                                    type="button"
-                                    onClick={() => setPrimaryKpi(option.title)}
-                                    className={`rounded-3xl border p-5 text-left transition ${
-                                      primary
-                                        ? "border-yellow-300 bg-yellow-500/10 shadow-[0_18px_45px_rgba(250,204,21,0.12)]"
-                                        : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-white/5"
-                                    }`}
-                                  >
-                                    <div className="flex items-start justify-between gap-4">
-                                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-2xl">
-                                        {option.icon}
-                                      </div>
-                                      {primary ? (
-                                        <span className="rounded-full border border-yellow-300/50 bg-yellow-400 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-slate-950">
-                                          {"\u2B50"} Primary — 4x points
-                                        </span>
-                                      ) : null}
-                                    </div>
-
-                                    <div className="mt-5 text-base font-black text-white">{option.title}</div>
-                                    <div className="mt-2 text-sm text-slate-300">{option.description}</div>
-                                  </button>
+                                    option={option}
+                                    primary={primary}
+                                    onSelect={handlePrimaryKpiSelect}
+                                  />
                                 );
                               })}
                             </div>
@@ -1113,7 +1314,7 @@ export default function SessionIdentityPage() {
                         <div className="flex flex-col gap-3 sm:flex-row">
                           <Button
                             variant="ghost"
-                            onClick={() => setStepIndex((current) => Math.max(0, current - 1) as StepIndex)}
+                            onClick={handleBack}
                             disabled={stepIndex === 0 || saving || resettingIdentity}
                             className="h-11 rounded-2xl border border-white/10 bg-white/5 px-5 text-slate-200 hover:border-white/20"
                           >
@@ -1129,12 +1330,6 @@ export default function SessionIdentityPage() {
                           </Button>
                         </div>
                       </div>
-
-                      {stepIndex === 0 && !uniqueRoleAssignments ? (
-                        <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                          Each team member needs a distinct specialist role so the round workspace has clear decision ownership.
-                        </div>
-                      ) : null}
 
                       {isSessionHost ? (
                         <div className="flex justify-end">

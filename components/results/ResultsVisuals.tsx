@@ -247,6 +247,7 @@ export function RadarComparisonChart({ metrics }: { metrics: ComparisonMetric[] 
 
 export function PerformanceHistoryChart({ rows }: { rows: HistoryMetricRow[] }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const isSingleRound = rows.length <= 1;
 
   useEffect(() => {
     let chart: { destroy: () => void } | null = null;
@@ -296,5 +297,14 @@ export function PerformanceHistoryChart({ rows }: { rows: HistoryMetricRow[] }) 
     };
   }, [rows]);
 
-  return <div className="h-[360px]"><canvas ref={canvasRef} /></div>;
+  return (
+    <div className="relative h-[360px]">
+      <canvas ref={canvasRef} />
+      {isSingleRound ? (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-6 text-center text-sm font-medium text-slate-500">
+          Complete more rounds to see performance trends
+        </div>
+      ) : null}
+    </div>
+  );
 }

@@ -14,6 +14,7 @@ type RoleStatus = {
 
 type TeamCoordPanelProps = {
   currentRole: TeamMemberRole | null;
+  isSolo: boolean;
   assignments: Partial<Record<TeamMemberRole, RoleAssignment>>;
   statuses: Partial<Record<TeamMemberRole, RoleStatus>>;
   allRolesReady: boolean;
@@ -35,6 +36,7 @@ function formatSavedAt(value: string | null | undefined) {
 
 export default function TeamCoordPanel({
   currentRole,
+  isSolo,
   assignments,
   statuses,
   allRolesReady,
@@ -51,19 +53,29 @@ export default function TeamCoordPanel({
           <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-teal-300">Team Coordination</div>
           <div className="mt-2 text-2xl font-black tracking-tight text-white">Role Readiness Board</div>
           <div className="mt-2 text-sm leading-6 text-slate-300">
-            Every specialist can see the full round, but final lock waits on saved inputs from the assigned roles.
+            {isSolo
+              ? "Solo mode is active. Role locks are disabled and every decision area is open for you."
+              : "Every specialist can see the full round, but final lock waits on saved inputs from the assigned roles."}
           </div>
         </div>
         <div
           className={`rounded-full border px-4 py-2 text-xs font-bold uppercase tracking-[0.22em] ${
-            allRolesReady
+            isSolo
+              ? "border-cyan-400/30 bg-cyan-500/15 text-cyan-100"
+              : allRolesReady
               ? "border-emerald-400/30 bg-emerald-500/15 text-emerald-100"
               : "border-amber-400/30 bg-amber-500/15 text-amber-100"
           }`}
         >
-          {allRolesReady ? "All Roles Ready" : "Coordination In Progress"}
+          {isSolo ? "Solo Session" : allRolesReady ? "All Roles Ready" : "Coordination In Progress"}
         </div>
       </div>
+
+      {isSolo ? (
+        <div className="mt-5 rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-4 py-4 text-sm text-cyan-100">
+          Solo session - lock available when ready
+        </div>
+      ) : null}
 
       <div className="mt-5 grid gap-3">
         {TEAM_MEMBER_ROLES.map((role) => {
@@ -124,7 +136,9 @@ export default function TeamCoordPanel({
         ) : currentRole === "project_director" ? (
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div className="text-sm text-slate-300">
-              {allRolesReady
+              {isSolo
+                ? "Solo session - lock available when ready."
+                : allRolesReady
                 ? "All assigned roles have saved their drafts. The Project Director can finalize the round now."
                 : waitingMessage}
             </div>

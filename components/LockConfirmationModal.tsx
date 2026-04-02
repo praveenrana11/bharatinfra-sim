@@ -11,13 +11,22 @@ export type LockConfirmationSection = {
   }>;
 };
 
+type LockConfirmationPreflightWarning = {
+  tone: "amber" | "red";
+  title: string;
+  body: string;
+} | null;
+
 type LockConfirmationModalProps = {
   open: boolean;
   sections: LockConfirmationSection[];
   warningItems?: string[];
+  preflightWarning?: LockConfirmationPreflightWarning;
+  reviewLabel?: string;
+  confirmLabel?: string;
   onClose: () => void;
   onReview: () => void;
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
   isSubmitting?: boolean;
 };
 
@@ -25,6 +34,9 @@ export default function LockConfirmationModal({
   open,
   sections,
   warningItems = [],
+  preflightWarning = null,
+  reviewLabel = "Review Decisions",
+  confirmLabel = "Confirm & Lock",
   onClose,
   onReview,
   onConfirm,
@@ -85,6 +97,31 @@ export default function LockConfirmationModal({
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
+          {preflightWarning ? (
+            <div
+              className={`mb-6 rounded-2xl px-4 py-4 ${
+                preflightWarning.tone === "red"
+                  ? "border border-rose-200 bg-rose-50"
+                  : "border border-amber-200 bg-amber-50"
+              }`}
+            >
+              <div
+                className={`text-sm font-semibold ${
+                  preflightWarning.tone === "red" ? "text-rose-800" : "text-amber-800"
+                }`}
+              >
+                {preflightWarning.title}
+              </div>
+              <div
+                className={`mt-2 text-sm leading-6 ${
+                  preflightWarning.tone === "red" ? "text-rose-900" : "text-amber-900"
+                }`}
+              >
+                {preflightWarning.body}
+              </div>
+            </div>
+          ) : null}
+
           {warningItems.length > 0 ? (
             <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4">
               <div className="text-xs font-bold uppercase tracking-[0.2em] text-amber-700">
@@ -134,15 +171,19 @@ export default function LockConfirmationModal({
             disabled={isSubmitting}
             className="border-slate-300 bg-white text-slate-800 hover:border-slate-400 hover:bg-slate-100"
           >
-            Review Decisions
+            {reviewLabel}
           </Button>
           <Button
             type="button"
             onClick={onConfirm}
             disabled={isSubmitting}
-            className="border-rose-700 bg-gradient-to-r from-rose-600 to-red-600 text-white shadow-[0_10px_24px_rgba(225,29,72,0.28)] hover:from-rose-500 hover:to-red-500"
+            className={
+              preflightWarning?.tone === "amber"
+                ? "border-amber-600 bg-gradient-to-r from-amber-500 to-amber-600 text-white shadow-[0_10px_24px_rgba(217,119,6,0.28)] hover:from-amber-400 hover:to-amber-500"
+                : "border-rose-700 bg-gradient-to-r from-rose-600 to-red-600 text-white shadow-[0_10px_24px_rgba(225,29,72,0.28)] hover:from-rose-500 hover:to-red-500"
+            }
           >
-            {isSubmitting ? "Locking..." : "Confirm & Lock"}
+            {isSubmitting ? "Locking..." : confirmLabel}
           </Button>
         </div>
       </div>

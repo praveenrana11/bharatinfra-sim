@@ -8,8 +8,14 @@ import {
   getCarryoverRiskIndicators,
   parseCarryoverState,
 } from "@/lib/consequenceEngine";
+import { generateRoundNarrative } from "@/lib/roundNarrative";
 import { parseConstructionEvents } from "@/lib/newsPayload";
-import { getScenarioFamily, getScenarioHeroImageUrl, type ScenarioFamily } from "@/lib/simVisuals";
+import {
+  getScenarioFamily,
+  getScenarioHeroImageUrl,
+  getScenarioTypeLabel,
+  type ScenarioFamily,
+} from "@/lib/simVisuals";
 import { getSupabaseClient } from "@/lib/supabaseClient";
 
 type RoundBriefingCardProps = {
@@ -37,6 +43,7 @@ type PreviousResultRow = {
   cost_index: number | null;
   safety_score: number | null;
   stakeholder_score: number | null;
+  ld_triggered: boolean | null;
   carryover_state: unknown;
 };
 
@@ -59,6 +66,7 @@ type BriefingState = {
   eventDescription: string;
   positioningStrategy: string;
   primaryKpi: string;
+  projectDirectorName: string;
 };
 
 type Tone = "good" | "warning" | "danger" | "neutral";
@@ -78,6 +86,7 @@ const DEFAULT_STATE: BriefingState = {
   eventDescription: "",
   positioningStrategy: "Not selected",
   primaryKpi: "Not selected",
+  projectDirectorName: "Project Director",
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -95,6 +104,16 @@ function toNumber(value: unknown) {
     if (Number.isFinite(parsed)) return parsed;
   }
   return null;
+}
+
+function resolveProjectDirectorName(identityProfile: Record<string, unknown>) {
+  const roleAssignments = identityProfile.role_assignments;
+  if (!roleAssignments || typeof roleAssignments !== "object") return "Project Director";
+
+  const rawValue = (roleAssignments as Record<string, unknown>).project_director;
+  if (typeof rawValue !== "string" || !rawValue.trim()) return "Project Director";
+
+  return rawValue.replace(/\s*\(You\)\s*$/, "").trim() || "Project Director";
 }
 
 function quarterForRound(roundNumber: number) {
@@ -320,6 +339,7 @@ export default function RoundBriefingCard({
   const supabase = useMemo(() => getSupabaseClient(), []);
   const [state, setState] = useState<BriefingState>(DEFAULT_STATE);
   const [loading, setLoading] = useState(true);
+  const [heroImageHidden, setHeroImageHidden] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -360,7 +380,7 @@ export default function RoundBriefingCard({
         roundNumber > 1
           ? supabase
               .from("team_results")
-              .select("schedule_index,cost_index,safety_score,stakeholder_score,carryover_state")
+              .select("schedule_index,cost_index,safety_score,stakeholder_score,ld_triggered,carryover_state")
               .eq("session_id", sessionId)
               .eq("team_id", teamId)
               .eq("round_number", roundNumber - 1)
@@ -418,6 +438,7 @@ export default function RoundBriefingCard({
         eventDescription: activeEvent?.description ?? "",
         positioningStrategy: toText(identityProfile.positioning_strategy, "Not selected"),
         primaryKpi: toText(identityProfile.primary_kpi, team.kpi_target ?? "Not selected"),
+        projectDirectorName: resolveProjectDirectorName(identityProfile),
       };
 
       if (!cancelled) {
@@ -437,7 +458,37 @@ export default function RoundBriefingCard({
   const quarterLabel = quarterForRound(roundNumber);
   const fyLabel = fyForRound(roundNumber);
   const clientBadge = clientInitials(state.client);
-  const heroImageUrl = getScenarioHeroImageUrl(state.projectName);
+  const scenarioTypeLabel = getScenarioTypeLabel(state.projectName);
+  const scenarioImageUrl = getScenarioHeroImageUrl(state.projectName);
+  const roundNarrative = useMemo(
+    () =>
+      generateRoundNarrative(
+        roundNumber,
+        scenarioTypeLabel,
+        state.client,
+        state.projectName,
+        state.previousResult,
+        state.carryoverState
+      ),
+    [
+      roundNumber,
+      scenarioTypeLabel,
+      state.client,
+      state.projectName,
+      state.previousResult,
+      state.carryoverState,
+    ]
+  );
+
+  useEffect(() => {
+    setHeroImageHidden(false);
+    console.log("[RoundBriefingCard] scenarioImageUrl", {
+      projectName: state.projectName,
+      scenarioFamily: state.scenarioFamily,
+      scenarioTypeLabel,
+      scenarioImageUrl,
+    });
+  }, [scenarioImageUrl, scenarioTypeLabel, state.projectName, state.scenarioFamily]);
 
   const budgetTile = isBaseline
     ? {
@@ -490,13 +541,31 @@ export default function RoundBriefingCard({
 
   return (
     <section className="glass-panel overflow-hidden rounded-[28px] border border-white/10 shadow-[0_24px_70px_rgba(15,23,42,0.45)]">
-      <div className="relative h-40 overflow-hidden">
-        <img
-          src={heroImageUrl}
-          alt={`${state.projectName} project hero`}
-          className="h-full w-full object-cover"
+      <div className="relative h-40 overflow-hidden bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.28),transparent_35%),radial-gradient(circle_at_bottom_right,rgba(245,158,11,0.24),transparent_32%),linear-gradient(135deg,#0f172a_0%,#111827_48%,#1e293b_100%)]">
+        {!heroImageHidden ? (
+          <img
+            src={scenarioImageUrl}
+            alt={`${state.projectName} project hero`}
+            className="h-full w-full object-cover"
+            crossOrigin="anonymous"
+            onError={(event) => {
+              console.warn("[RoundBriefingCard] scenario image failed", {
+                projectName: state.projectName,
+                scenarioTypeLabel,
+                scenarioImageUrl,
+              });
+              event.currentTarget.style.display = "none";
+              setHeroImageHidden(true);
+            }}
+          />
+        ) : null}
+        <div
+          className={`absolute inset-0 ${
+            heroImageHidden
+              ? "bg-gradient-to-t from-slate-950/92 via-slate-950/62 to-slate-900/20"
+              : "bg-gradient-to-t from-slate-950/90 via-slate-950/50 to-slate-950/15"
+          }`}
         />
-        <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-slate-950/50 to-slate-950/15" />
         <div className="absolute inset-x-0 bottom-0 px-5 py-5 sm:px-6">
           <div className="text-[11px] font-bold uppercase tracking-[0.28em] text-white/70">
             Project Brief
@@ -565,6 +634,16 @@ export default function RoundBriefingCard({
             tone={stakeholderTile.tone}
             icon={<PeopleIcon />}
           />
+        </div>
+
+        <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+          <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-400">Site Diary</div>
+          <div className="mt-3 border-l-2 border-brand-primary/80 pl-4">
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-brand-primary/85">
+              {`📋 ${quarterLabel} Field Notes - ${state.projectDirectorName}`}
+            </div>
+            <p className="mt-2 text-sm italic leading-7 text-slate-300/88">{roundNarrative}</p>
+          </div>
         </div>
 
         <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/45 px-4 py-4">

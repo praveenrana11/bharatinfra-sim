@@ -1,8 +1,12 @@
 const SCENARIO_HERO_IMAGES = {
-  metroRail: "https://images.pexels.com/photos/1427107/pexels-photo-1427107.jpeg",
-  airportTerminal: "https://images.pexels.com/photos/358319/pexels-photo-358319.jpeg",
-  industrialPlant: "https://images.pexels.com/photos/1108572/pexels-photo-1108572.jpeg",
-  highwayPackage: "https://images.pexels.com/photos/594452/pexels-photo-594452.jpeg",
+  metroRail:
+    "https://images.pexels.com/photos/1427107/pexels-photo-1427107.jpeg?auto=compress&cs=tinysrgb&w=800",
+  airportTerminal:
+    "https://images.pexels.com/photos/358319/pexels-photo-358319.jpeg?auto=compress&cs=tinysrgb&w=800",
+  industrialPlant:
+    "https://images.pexels.com/photos/1108572/pexels-photo-1108572.jpeg?auto=compress&cs=tinysrgb&w=800",
+  highwayPackage:
+    "https://images.pexels.com/photos/594452/pexels-photo-594452.jpeg?auto=compress&cs=tinysrgb&w=800",
 } as const;
 
 const EVENT_IMAGES = {
@@ -38,11 +42,11 @@ export function getScenarioTypeLabel(name: string | null | undefined) {
 }
 
 export function getScenarioHeroImageUrl(name: string | null | undefined) {
-  const scenarioType = getScenarioTypeLabel(name);
+  const scenarioFamily = getScenarioFamily(name);
 
-  if (scenarioType === "Metro Rail") return SCENARIO_HERO_IMAGES.metroRail;
-  if (scenarioType === "Airport Terminal") return SCENARIO_HERO_IMAGES.airportTerminal;
-  if (scenarioType === "Industrial Plant") return SCENARIO_HERO_IMAGES.industrialPlant;
+  if (scenarioFamily === "metro") return SCENARIO_HERO_IMAGES.metroRail;
+  if (scenarioFamily === "airport") return SCENARIO_HERO_IMAGES.airportTerminal;
+  if (scenarioFamily === "industrial") return SCENARIO_HERO_IMAGES.industrialPlant;
 
   return SCENARIO_HERO_IMAGES.highwayPackage;
 }

@@ -636,6 +636,7 @@ function applyRoleOwnedFields(
   role: TeamMemberRole | null
 ) {
   if (!role) return baseForm;
+  if (role === "project_director") return nextForm;
 
   const merged: ExtendedDecisionForm = { ...baseForm };
   const mergedRecord = merged as Record<
@@ -655,6 +656,7 @@ function mergeDilemmaSelectionsByRole(
   dilemmas: Dilemma[]
 ) {
   if (!role) return latestSelections;
+  if (role === "project_director") return currentSelections;
 
   const merged = { ...latestSelections };
   for (const dilemma of dilemmas) {
@@ -792,7 +794,7 @@ function DecisionOwnershipGate({
   className?: string;
 }) {
   const ownerRole = getDecisionOwner(decisionKey);
-  const isOwned = ownerRole ? currentRole === ownerRole : true;
+  const isOwned = ownerRole ? currentRole === "project_director" || currentRole === ownerRole : true;
   const ownerName = getRoleName(ownerRole);
   const ownerMember = ownerRole ? roleAssignments[ownerRole]?.memberLabel ?? ownerName : "Shared";
 
@@ -1296,7 +1298,7 @@ function riskBadgeTone(level: DilemmaOption["risk_level"]) {
 
 function formatImpactChip(label: string, value: number, decimals = 0) {
   const roundedValue = decimals > 0 ? value.toFixed(decimals) : `${Math.round(value)}`;
-  const arrow = value >= 0 ? "Up" : "Down";
+  const arrow = value >= 0 ? "↑" : "↓";
   const sign = value > 0 ? "+" : "";
   return `${arrow} ${label} ${sign}${roundedValue}`;
 }
@@ -1333,6 +1335,7 @@ export default function RoundDecisionPage() {
   const [teamName, setTeamName] = useState("");
   const [companyName, setCompanyName] = useState("Project Team");
   const [currentRole, setCurrentRole] = useState<TeamMemberRole | null>(null);
+  const [isSolo, setIsSolo] = useState(false);
   const [roleAssignments, setRoleAssignments] = useState<Partial<Record<TeamMemberRole, TeamRoleAssignment>>>({});
   const [coordinationState, setCoordinationState] = useState<Partial<Record<TeamMemberRole, CoordinationStatus>>>({});
   const [sessionRoundCount, setSessionRoundCount] = useState(0);
@@ -1424,18 +1427,23 @@ export default function RoundDecisionPage() {
   const budget: BudgetBreakdown = useMemo(() => estimateBudgetBreakdown(profile), [profile]);
   const totalRounds = Math.max(stepProjectContext.totalRounds, sessionRoundCount, roundNumber, 1);
   const roundsRemaining = Math.max(totalRounds - roundNumber, 0);
-  const isProjectDirector = currentRole === "project_director";
-  const ownedAreaLabels = getRoleOwnedAreas(currentRole);
-  const assignedOtherRoles = TEAM_MEMBER_ROLES.filter((role) => role !== currentRole && Boolean(roleAssignments[role]));
+  const effectiveRole = isSolo ? "project_director" : currentRole;
+  const canEditField = (fieldOwner: TeamMemberRole | string | null | undefined) =>
+    isSolo || effectiveRole === "project_director" || effectiveRole === fieldOwner;
+  const canEditDecision = (decisionKey: string) => canEditField(getDecisionOwner(decisionKey));
+  const isProjectDirector = effectiveRole === "project_director";
+  const ownedAreaLabels = isSolo ? ["All decision areas (solo mode)"] : getRoleOwnedAreas(effectiveRole);
+  const assignedOtherRoles = TEAM_MEMBER_ROLES.filter((role) => role !== effectiveRole && Boolean(roleAssignments[role]));
   const coordinationReadyRoles = TEAM_MEMBER_ROLES.filter(
     (role) => roleAssignments[role] && coordinationState[role]?.draftSavedAt
   );
   const allAssignedRolesReady =
-    Object.keys(roleAssignments).length > 0 &&
-    TEAM_MEMBER_ROLES.every((role) => !roleAssignments[role] || Boolean(coordinationState[role]?.draftSavedAt));
-  const coordinationWaitingRoles = TEAM_MEMBER_ROLES.filter(
-    (role) => roleAssignments[role] && !coordinationState[role]?.draftSavedAt
-  );
+    isSolo ||
+    (Object.keys(roleAssignments).length > 0 &&
+      TEAM_MEMBER_ROLES.every((role) => !roleAssignments[role] || Boolean(coordinationState[role]?.draftSavedAt)));
+  const coordinationWaitingRoles = isSolo
+    ? []
+    : TEAM_MEMBER_ROLES.filter((role) => roleAssignments[role] && !coordinationState[role]?.draftSavedAt);
 
   useEffect(() => {
     setResolvedRoundEvents(roundEvents);
@@ -2017,6 +2025,7 @@ export default function RoundDecisionPage() {
       stepStartRef.current = Date.now();
       setActiveStep(0);
       setCurrentRole(null);
+      setIsSolo(false);
       setRoleAssignments({});
       setCoordinationState({});
       setStepProjectContext(DEFAULT_STEP_PROJECT_CONTEXT);
@@ -2107,6 +2116,8 @@ export default function RoundDecisionPage() {
         setLoading(false);
         return;
       }
+      const teamMembershipList = (teamMembershipRows ?? []) as TeamMembershipRoleRow[];
+      setIsSolo(teamMembershipList.length === 1);
 
       const viewerLabel =
         (typeof user.user_metadata?.full_name === "string" && user.user_metadata.full_name) ||
@@ -2114,7 +2125,7 @@ export default function RoundDecisionPage() {
         user.email?.split("@")[0] ||
         "You";
 
-      const assignments = ((teamMembershipRows ?? []) as TeamMembershipRoleRow[]).reduce<
+      const assignments = teamMembershipList.reduce<
         Partial<Record<TeamMemberRole, TeamRoleAssignment>>
       >((accumulator, member) => {
         if (!member.member_role) return accumulator;
@@ -2320,7 +2331,7 @@ export default function RoundDecisionPage() {
 
     try {
       if (!teamId) throw new Error("Team not loaded yet.");
-      if (!currentRole) throw new Error("Your specialist role is not assigned yet. Complete identity setup first.");
+      if (!effectiveRole) throw new Error("Your specialist role is not assigned yet. Complete identity setup first.");
       await ensureTeamKpiTarget(false);
 
       const { data: latestDecisionData, error: latestDecisionError } = await supabase
@@ -2336,19 +2347,19 @@ export default function RoundDecisionPage() {
       if (latestDecisionError) throw latestDecisionError;
 
       const latestState = extractDecisionState((latestDecisionData as ExistingDecisionRow | null) ?? null);
-      const mergedForm = applyRoleOwnedFields(latestState.form, form, currentRole);
+      const mergedForm = applyRoleOwnedFields(latestState.form, form, effectiveRole);
       const mergedDilemmaSelections = mergeDilemmaSelectionsByRole(
         selectedDilemmaOptionIds,
         latestState.selectedDilemmaOptionIds,
-        currentRole,
+        effectiveRole,
         roundDilemmas
       );
-      const mergedEventsChosen = currentRole === "project_director" ? eventsChosen : latestState.eventsChosen;
-      const mergedForecast = currentRole === "finance_head" ? forecast : latestState.forecast;
+      const mergedEventsChosen = canEditField("project_director") ? eventsChosen : latestState.eventsChosen;
+      const mergedForecast = canEditField("finance_head") ? forecast : latestState.forecast;
       const savedAt = new Date().toISOString();
       const mergedCoordinationState = buildCoordinationPayload(
         latestState.coordinationState,
-        currentRole,
+        effectiveRole,
         roleAssignments,
         userId,
         savedAt
@@ -2419,7 +2430,7 @@ export default function RoundDecisionPage() {
     try {
       if (!teamId) throw new Error("Team not loaded yet.");
       if (!isProjectDirector) throw new Error("Only the Project Director can lock and generate results.");
-      if (!currentRole) throw new Error("Your specialist role is not assigned yet. Complete identity setup first.");
+      if (!effectiveRole) throw new Error("Your specialist role is not assigned yet. Complete identity setup first.");
       if (!allAssignedRolesReady) {
         throw new Error(
           coordinationWaitingRoles.length > 0
@@ -2445,15 +2456,15 @@ export default function RoundDecisionPage() {
       if (latestDecisionError) throw latestDecisionError;
 
       const latestState = extractDecisionState((latestDecisionData as ExistingDecisionRow | null) ?? null);
-      const mergedForm = applyRoleOwnedFields(latestState.form, form, currentRole);
+      const mergedForm = applyRoleOwnedFields(latestState.form, form, effectiveRole);
       const mergedDilemmaSelections = mergeDilemmaSelectionsByRole(
         selectedDilemmaOptionIds,
         latestState.selectedDilemmaOptionIds,
-        currentRole,
+        effectiveRole,
         roundDilemmas
       );
-      const mergedEventsChosen = eventsChosen;
-      const mergedForecast = latestState.forecast;
+      const mergedEventsChosen = canEditField("project_director") ? eventsChosen : latestState.eventsChosen;
+      const mergedForecast = canEditField("finance_head") ? forecast : latestState.forecast;
       const mergedFocusSum =
         mergedForm.focus_cost + mergedForm.focus_quality + mergedForm.focus_stakeholder + mergedForm.focus_speed;
       if (mergedFocusSum !== 100) throw new Error(`Focus must total 100 (current: ${mergedFocusSum}).`);
@@ -2462,7 +2473,7 @@ export default function RoundDecisionPage() {
       const latePenaltyPreview = computeLatePenalty(roundDeadlineIso, submittedAt, roundClockSource);
       const mergedCoordinationState = buildCoordinationPayload(
         latestState.coordinationState,
-        currentRole,
+        effectiveRole,
         roleAssignments,
         userId,
         submittedAt
@@ -2798,7 +2809,7 @@ export default function RoundDecisionPage() {
     return `Step ${step + 1} is incomplete - ${summary}${remainder}. Some fields may be missing.`;
   };
 
-  const requestStepNavigation = (nextStep: StepIndex, source: string) => {
+  const goToStep = (nextStep: StepIndex, source: string) => {
     if (nextStep > activeStep && !stepValidations[activeStep]) {
       const warningMessage = getIncompleteStepMessage(activeStep);
       if (warningMessage) {
@@ -2812,13 +2823,24 @@ export default function RoundDecisionPage() {
   const nextStep = () => {
     const candidate = Math.min(activeStep + 1, 4) as StepIndex;
     if (candidate !== activeStep) {
-      requestStepNavigation(candidate, "next-button");
+      goToStep(candidate, "next-button");
     }
   };
 
   const prevStep = () => {
     const candidate = Math.max(activeStep - 1, 0) as StepIndex;
-    navigateToStep(candidate, "previous-button");
+    goToStep(candidate, "previous-button");
+  };
+  const handleFooterNext = () => {
+    console.log("Footer Next clicked");
+    const candidate = Math.min(activeStep + 1, 4) as StepIndex;
+    if (candidate !== activeStep) {
+      goToStep(candidate, "footer-next");
+    }
+  };
+  const handleFooterPrevious = () => {
+    const candidate = Math.max(activeStep - 1, 0) as StepIndex;
+    goToStep(candidate, "footer-previous");
   };
 
   const showWaitingForRound = !locked && roundStatus === "pending";
@@ -2841,10 +2863,25 @@ export default function RoundDecisionPage() {
       : roundStatus === "pending"
         ? "Facilitator has not opened this round yet."
         : `${formatStatus(roundStatus)}. Awaiting next step.`;
-  const coordinationWaitingMessage =
-    coordinationWaitingRoles.length > 0
+  const coordinationWaitingMessage = isSolo
+    ? "Solo session - lock available when ready"
+    : coordinationWaitingRoles.length > 0
       ? `Waiting on ${formatRoleList(coordinationWaitingRoles)} to save their specialist drafts.`
       : "Waiting for the team to complete role assignments.";
+  const zeroDilemmaWarning =
+    selectedDilemmaCount === 0
+      ? isSolo
+        ? {
+            tone: "amber" as const,
+            title: "Management decisions were skipped. Default outcomes applied.",
+            body: "No Step 2 dilemmas were committed for this solo session. The simulator will apply default outcomes if you lock now.",
+          }
+        : {
+            tone: "red" as const,
+            title: "⚠️ No Management Decisions committed",
+            body: "You have not committed any decisions in Step 2. This will apply default (lowest scoring) outcomes to all 3 management dilemmas. Your score will be penalised.",
+          }
+      : null;
 
   return (
     <RequireAuth>
@@ -2856,9 +2893,17 @@ export default function RoundDecisionPage() {
           onClose={() => setShowLockConfirmation(false)}
           onReview={() => {
             setShowLockConfirmation(false);
+            if (selectedDilemmaCount === 0) {
+              navigateToStep(1, "lock-review-dilemmas");
+              window.scrollTo({ top: 0, behavior: "smooth" });
+              return;
+            }
             navigateToStep(0, "lock-review");
           }}
           onConfirm={lockAndGenerateResults}
+          reviewLabel={selectedDilemmaCount === 0 ? "Go Back and Decide" : "Review Decisions"}
+          confirmLabel={selectedDilemmaCount === 0 && !isSolo ? "Lock Anyway - Accept Penalty" : "Confirm & Lock"}
+          preflightWarning={zeroDilemmaWarning}
           isSubmitting={locking}
         />
         {navigationNotice ? (
@@ -2949,24 +2994,36 @@ export default function RoundDecisionPage() {
                   <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-teal-300">Role Indicator</div>
                   <div className="mt-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                     <div className="text-sm text-slate-200">
-                      <span className="font-bold text-white">You are: {getRoleName(currentRole)}</span>
+                      <span className="font-bold text-white">You are: {getRoleName(effectiveRole)}</span>
                       <span className="mx-2 text-slate-500">|</span>
                       <span>
                         You own: {ownedAreaLabels.length > 0 ? ownedAreaLabels.join(", ") : "No specialist areas assigned yet"}
                       </span>
                     </div>
                     <div className="rounded-full border border-white/10 bg-slate-950/60 px-4 py-2 text-xs font-semibold text-slate-300">
-                      {currentRole ? getRoleLabel(currentRole) : "Complete identity setup to unlock ownership"}
+                      {isSolo
+                        ? "Solo mode - all decisions unlocked"
+                        : effectiveRole
+                          ? getRoleLabel(effectiveRole)
+                          : "Complete identity setup to unlock ownership"}
                     </div>
                   </div>
+                  {isSolo ? (
+                    <div className="mt-3 rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-100">
+                      Solo mode - all decisions unlocked. In team play, decisions are split by role.
+                    </div>
+                  ) : null}
                   <div className="mt-3 text-sm text-slate-300">
-                    {assignedOtherRoles.length > 0
+                    {isSolo
+                      ? "This is a solo session, so you can work across every decision area and lock when ready."
+                      : assignedOtherRoles.length > 0
                       ? `Coordinate with your ${formatRoleList(assignedOtherRoles)} before locking.`
                       : "Coordinate with the rest of the team before locking."}
                   </div>
                 </section>
                 <TeamCoordPanel
-                  currentRole={currentRole}
+                  currentRole={effectiveRole}
+                  isSolo={isSolo}
                   assignments={roleAssignments}
                   statuses={coordinationState}
                   allRolesReady={allAssignedRolesReady}
@@ -2982,7 +3039,7 @@ export default function RoundDecisionPage() {
                       const idx = index as StepIndex;
                       const current = activeStep === idx;
                       const complete = idx < activeStep || stepValidations[idx];
-                      const ownsStep = roleOwnsStep(currentRole, idx + 1);
+                      const ownsStep = roleOwnsStep(effectiveRole, idx + 1);
                       return (
                         <div
                           key={`tablet-step-${title}`}
@@ -3015,11 +3072,11 @@ export default function RoundDecisionPage() {
                         {stepTitles.map((title, index) => {
                           const idx = index as StepIndex;
                           const current = activeStep === idx;
-                          const ownsStep = roleOwnsStep(currentRole, idx + 1);
+                          const ownsStep = roleOwnsStep(effectiveRole, idx + 1);
                           return (
                             <button
                               key={title}
-                              onClick={() => requestStepNavigation(idx, "stepper-tab")}
+                              onClick={() => goToStep(idx, "stepper-tab")}
                               className={`px-5 py-2.5 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-all ${
                                 current
                                   ? ownsStep
@@ -3045,7 +3102,7 @@ export default function RoundDecisionPage() {
                         </StepContextBanner>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Team KPI Target (4x points)</div>
-                          <DecisionOwnershipGate decisionKey="team_kpi_target" currentRole={currentRole} roleAssignments={roleAssignments}>
+                          <DecisionOwnershipGate decisionKey="team_kpi_target" currentRole={effectiveRole} roleAssignments={roleAssignments}>
                             {teamKpiTarget ? (
                               <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-400 font-bold shadow-inner flex justify-between items-center">
                                 <span>LOCKED TARGET // {teamKpiTarget}</span>
@@ -3053,8 +3110,8 @@ export default function RoundDecisionPage() {
                               </div>
                             ) : roundNumber === 1 ? (
                               <div className="space-y-4">
-                                <SegmentedControl options={KPI_TARGET_OPTIONS.map(k=>({value:k.value,text:k.value,hint:k.thresholdLabel}))} activeOption={draftKpiTarget} onSelect={(value) => setDraftKpiTarget(value)} disabled={isLocked || !isProjectDirector} />
-                                <div className="pt-2"><Button variant="secondary" onClick={saveKpiTargetNow} disabled={isLocked || !draftKpiTarget || savingKpiTarget || !isProjectDirector}>{savingKpiTarget ? "SAVING..." : "LOCK KPI TARGET"}</Button></div>
+                                <SegmentedControl options={KPI_TARGET_OPTIONS.map(k=>({value:k.value,text:k.value,hint:k.thresholdLabel}))} activeOption={draftKpiTarget} onSelect={(value) => setDraftKpiTarget(value)} disabled={isLocked || !canEditDecision("team_kpi_target")} />
+                                <div className="pt-2"><Button variant="secondary" onClick={saveKpiTargetNow} disabled={isLocked || !draftKpiTarget || savingKpiTarget || !canEditDecision("team_kpi_target")}>{savingKpiTarget ? "SAVING..." : "LOCK KPI TARGET"}</Button></div>
                               </div>
                             ) : (
                               <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400 shadow-inner">KPI TARGET NOT SET IN R1</div>
@@ -3063,7 +3120,7 @@ export default function RoundDecisionPage() {
                         </div>
 
                         {deckEvents.length > 0 && (
-                          <DecisionOwnershipGate decisionKey="strategic_posture" currentRole={currentRole} roleAssignments={roleAssignments}>
+                          <DecisionOwnershipGate decisionKey="strategic_posture" currentRole={effectiveRole} roleAssignments={roleAssignments}>
                           <div className="p-5 rounded-2xl bg-slate-900/40 border border-teal-500/30 space-y-4">
                             <div className="text-[10px] font-bold uppercase tracking-widest text-teal-500 flex items-center justify-between">
                               <span>Event Deck (Action Required)</span>
@@ -3086,7 +3143,7 @@ export default function RoundDecisionPage() {
                                         options={evt.choices.map(c => ({ value: c.id, text: c.label, hint: c.theoryHint }))}
                                         activeOption={eventsChosen[evt.id] || ""}
                                         onSelect={(v) => updateEventChoice(evt.id, v)}
-                                        disabled={isLocked || !isProjectDirector}
+                                        disabled={isLocked || !canEditField("project_director")}
                                       />
                                     </div>
                                   </div>
@@ -3097,7 +3154,7 @@ export default function RoundDecisionPage() {
                           </DecisionOwnershipGate>
                         )}
 
-                        <DecisionOwnershipGate decisionKey="external_context" currentRole={currentRole} roleAssignments={roleAssignments}>
+                        <DecisionOwnershipGate decisionKey="external_context" currentRole={effectiveRole} roleAssignments={roleAssignments}>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Live External Context</div>
                           <SegmentedControl
@@ -3107,7 +3164,7 @@ export default function RoundDecisionPage() {
                             }))}
                             activeOption={form.external_context}
                             onSelect={(v)=>update("external_context",v)}
-                            disabled={isLocked || !isProjectDirector}
+                            disabled={isLocked || !canEditDecision("external_context")}
                           />
                         </div>
                         </DecisionOwnershipGate>
@@ -3118,17 +3175,17 @@ export default function RoundDecisionPage() {
                             <div className={`text-[10px] font-mono font-bold ${focusSum===100?"text-emerald-400":"text-rose-400"}`}>TOTAL: {focusSum}/100</div>
                           </div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionOwnershipGate decisionKey="focus_cost" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Cost Focus" tooltip={decisionFieldTooltips.costFocus} />} value={form.focus_cost} min={0} max={100} onChange={v=>update("focus_cost",v)} disabled={isLocked || currentRole !== "finance_head"} /></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="focus_quality" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Quality Focus" tooltip={decisionFieldTooltips.qualityFocus} />} value={form.focus_quality} min={0} max={100} onChange={v=>update("focus_quality",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="focus_stakeholder" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Stakeholder Focus" tooltip={decisionFieldTooltips.stakeholderFocus} />} value={form.focus_stakeholder} min={0} max={100} onChange={v=>update("focus_stakeholder",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="focus_speed" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Speed Focus" tooltip={decisionFieldTooltips.speedFocus} />} value={form.focus_speed} min={0} max={100} onChange={v=>update("focus_speed",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="focus_cost" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Cost Focus" tooltip={decisionFieldTooltips.costFocus} />} value={form.focus_cost} min={0} max={100} onChange={v=>update("focus_cost",v)} disabled={isLocked || !canEditDecision("focus_cost")} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="focus_quality" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Quality Focus" tooltip={decisionFieldTooltips.qualityFocus} />} value={form.focus_quality} min={0} max={100} onChange={v=>update("focus_quality",v)} disabled={isLocked || !canEditDecision("focus_quality")} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="focus_stakeholder" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Stakeholder Focus" tooltip={decisionFieldTooltips.stakeholderFocus} />} value={form.focus_stakeholder} min={0} max={100} onChange={v=>update("focus_stakeholder",v)} disabled={isLocked || !canEditDecision("focus_stakeholder")} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="focus_speed" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Speed Focus" tooltip={decisionFieldTooltips.speedFocus} />} value={form.focus_speed} min={0} max={100} onChange={v=>update("focus_speed",v)} disabled={isLocked || !canEditDecision("focus_speed")} /></DecisionOwnershipGate>
                           </div>
                         </div>
                         
-                        <DecisionOwnershipGate decisionKey="strategic_posture" currentRole={currentRole} roleAssignments={roleAssignments}>
+                        <DecisionOwnershipGate decisionKey="strategic_posture" currentRole={effectiveRole} roleAssignments={roleAssignments}>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Strategic Posture</div>
-                          <SegmentedControl options={postureOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.strategic_posture} onSelect={(v)=>update("strategic_posture",v)} disabled={isLocked || !isProjectDirector} />
+                          <SegmentedControl options={postureOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.strategic_posture} onSelect={(v)=>update("strategic_posture",v)} disabled={isLocked || !canEditDecision("strategic_posture")} />
                         </div>
                         </DecisionOwnershipGate>
                      </div>
@@ -3140,6 +3197,11 @@ export default function RoundDecisionPage() {
                         <StepContextBanner>
                           {`🏗️ Current portfolio: ${stepProjectContext.scenarioType} | Your strategy: ${stepProjectContext.positioningStrategy}`}
                         </StepContextBanner>
+                        {isSolo ? (
+                          <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-100">
+                            Solo mode - all decisions unlocked. In team play, decisions are split by role.
+                          </div>
+                        ) : null}
                         <div className="rounded-[28px] border border-cyan-400/20 bg-gradient-to-br from-cyan-400/10 via-slate-950/90 to-slate-950 px-5 py-5 shadow-[0_18px_45px_rgba(2,6,23,0.32)]">
                           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                             <div className="space-y-2">
@@ -3195,27 +3257,27 @@ export default function RoundDecisionPage() {
                                 {dilemma.options.map((option) => {
                                   const selected = selectedDilemmaOptionIds[dilemma.id] === option.id;
                                   const dilemmaOwnerKey = `dilemma_${dilemma.category}`;
-                                  const dilemmaOwnedByCurrentRole = getDecisionOwner(dilemmaOwnerKey) === currentRole;
+                                  const dilemmaOwnedByCurrentRole = canEditDecision(dilemmaOwnerKey);
 
                                   return (
-                                    <DecisionOwnershipGate decisionKey={dilemmaOwnerKey} currentRole={currentRole} roleAssignments={roleAssignments} key={option.id}>
+                                    <DecisionOwnershipGate decisionKey={dilemmaOwnerKey} currentRole={effectiveRole} roleAssignments={roleAssignments} key={option.id}>
                                     <button
                                       type="button"
                                       disabled={isLocked || !dilemmaOwnedByCurrentRole}
                                       title={buildImpactPreview(option)}
                                       onClick={() => updateDilemmaChoice(dilemma.id, option.id)}
                                       className={cn(
-                                        "group relative flex min-h-[176px] flex-col rounded-[24px] border px-4 py-4 text-left transition",
+                                        "group relative flex min-h-[176px] cursor-pointer flex-col rounded-[24px] border px-4 py-4 text-left transition-all",
                                         selected
-                                          ? "border-cyan-400 bg-cyan-400/10 shadow-[0_0_0_1px_rgba(34,211,238,0.22)]"
-                                          : "border-white/10 bg-slate-950/75 hover:border-white/20 hover:bg-slate-950",
-                                        isLocked ? "cursor-default" : "cursor-pointer"
+                                          ? "border-2 border-brand-primary bg-brand-primary/5 shadow-md"
+                                          : "border-white/10 bg-slate-950/75 hover:border-brand-primary hover:shadow-md",
+                                        isLocked || !dilemmaOwnedByCurrentRole ? "cursor-not-allowed" : "hover:bg-slate-950"
                                       )}
                                     >
                                       <div className="flex items-start justify-between gap-3">
                                         <div className="text-base font-bold text-white">{option.label}</div>
                                         {selected ? (
-                                          <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-cyan-400/40 bg-cyan-400/20 text-cyan-100">
+                                          <span className="absolute right-4 top-4 inline-flex h-7 w-7 items-center justify-center rounded-full border border-brand-primary/40 bg-brand-primary/15 text-brand-primary">
                                             <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
                                               <path d="M3 8.5L6.5 12L13 4.5" strokeLinecap="round" strokeLinejoin="round" />
                                             </svg>
@@ -3229,6 +3291,9 @@ export default function RoundDecisionPage() {
                                         </span>
                                       </div>
                                       <div className="mt-auto pt-5 text-xs font-semibold text-slate-400 opacity-100 md:opacity-0 md:transition-opacity md:group-hover:opacity-100 md:group-focus-visible:opacity-100">
+                                        {buildImpactPreview(option)}
+                                      </div>
+                                      <div className="pointer-events-none absolute right-4 top-14 max-w-[220px] rounded-xl border border-brand-primary/25 bg-slate-950/95 px-3 py-2 text-[11px] font-semibold text-slate-200 opacity-0 shadow-lg transition-all group-hover:opacity-100 group-focus-visible:opacity-100">
                                         {buildImpactPreview(option)}
                                       </div>
                                     </button>
@@ -3262,30 +3327,30 @@ export default function RoundDecisionPage() {
                               <div className="rounded-2xl border border-white/10 bg-slate-950/65 px-4 py-4">
                                 <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Sector Selection</div>
                                 <div className="mt-4">
-                                  <DecisionOwnershipGate decisionKey="primary_sector" currentRole={currentRole} roleAssignments={roleAssignments}>
-                                    <SegmentedControl options={sectorOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.primary_sector} onSelect={(v)=>update("primary_sector",v)} disabled={isLocked || currentRole !== "contracts_manager"} />
+                                  <DecisionOwnershipGate decisionKey="primary_sector" currentRole={effectiveRole} roleAssignments={roleAssignments}>
+                                    <SegmentedControl options={sectorOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.primary_sector} onSelect={(v)=>update("primary_sector",v)} disabled={isLocked || !canEditDecision("primary_sector")} />
                                   </DecisionOwnershipGate>
                                 </div>
                                 <div className="mt-4 grid gap-4 md:grid-cols-2">
-                                  <DecisionOwnershipGate decisionKey="secondary_sector" currentRole={currentRole} roleAssignments={roleAssignments}>
+                                  <DecisionOwnershipGate decisionKey="secondary_sector" currentRole={effectiveRole} roleAssignments={roleAssignments}>
                                   <div className="flex flex-col">
                                     <span className="mb-2 text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Secondary Sector</span>
-                                    <select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm font-semibold text-white outline-none focus:border-cyan-500" value={form.secondary_sector} disabled={isLocked || currentRole !== "contracts_manager"} onChange={e=>update("secondary_sector",e.target.value as SecondarySector)}>
+                                    <select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm font-semibold text-white outline-none focus:border-cyan-500" value={form.secondary_sector} disabled={isLocked || !canEditDecision("secondary_sector")} onChange={e=>update("secondary_sector",e.target.value as SecondarySector)}>
                                       {secondarySectorOptions.map(o=><option key={o} value={o}>{o}</option>)}
                                     </select>
                                   </div>
                                   </DecisionOwnershipGate>
-                                  <DecisionOwnershipGate decisionKey="project_mix_public_pct" currentRole={currentRole} roleAssignments={roleAssignments}>
-                                    <DecisionSlider label={<FieldLabel label="Public Project Mix" tooltip={decisionFieldTooltips.publicProjectMix} />} value={form.project_mix_public_pct} min={0} max={100} suffix="%" onChange={v=>update("project_mix_public_pct",v)} disabled={isLocked || currentRole !== "contracts_manager"} />
+                                  <DecisionOwnershipGate decisionKey="project_mix_public_pct" currentRole={effectiveRole} roleAssignments={roleAssignments}>
+                                    <DecisionSlider label={<FieldLabel label="Public Project Mix" tooltip={decisionFieldTooltips.publicProjectMix} />} value={form.project_mix_public_pct} min={0} max={100} suffix="%" onChange={v=>update("project_mix_public_pct",v)} disabled={isLocked || !canEditDecision("project_mix_public_pct")} />
                                   </DecisionOwnershipGate>
                                 </div>
                               </div>
 
-                              <DecisionOwnershipGate decisionKey="market_expansion" currentRole={currentRole} roleAssignments={roleAssignments}>
+                              <DecisionOwnershipGate decisionKey="market_expansion" currentRole={effectiveRole} roleAssignments={roleAssignments}>
                               <div className="rounded-2xl border border-white/10 bg-slate-950/65 px-4 py-4">
                                 <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">Market Expansion</div>
                                 <div className="mt-4">
-                                  <SegmentedControl options={expansionOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.market_expansion} onSelect={(v)=>update("market_expansion",v)} disabled={isLocked || !isProjectDirector} />
+                                  <SegmentedControl options={expansionOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.market_expansion} onSelect={(v)=>update("market_expansion",v)} disabled={isLocked || !canEditDecision("market_expansion")} />
                                 </div>
                               </div>
                               </DecisionOwnershipGate>
@@ -3304,39 +3369,39 @@ export default function RoundDecisionPage() {
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Delivery Mix & Assets</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionOwnershipGate decisionKey="self_perform_percent" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Self-Perform Share" value={form.self_perform_percent} min={0} max={100} suffix="%" onChange={v=>update("self_perform_percent",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="pm_utilization_target" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="P&M Utilization Target" tooltip={decisionFieldTooltips.pmUtilizationTarget} />} value={form.pm_utilization_target} min={40} max={95} suffix="%" onChange={v=>update("pm_utilization_target",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="specialized_work_index" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Specialized Capability" tooltip={decisionFieldTooltips.specializedCapability} />} value={form.specialized_work_index} min={0} max={100} onChange={v=>update("specialized_work_index",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="work_life_balance_index" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Work-Life Balance" tooltip={decisionFieldTooltips.workLifeBalance} />} value={form.work_life_balance_index} min={0} max={100} onChange={v=>update("work_life_balance_index",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="self_perform_percent" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label="Self-Perform Share" value={form.self_perform_percent} min={0} max={100} suffix="%" onChange={v=>update("self_perform_percent",v)} disabled={isLocked || !canEditDecision("self_perform_percent")} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="pm_utilization_target" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="P&M Utilization Target" tooltip={decisionFieldTooltips.pmUtilizationTarget} />} value={form.pm_utilization_target} min={40} max={95} suffix="%" onChange={v=>update("pm_utilization_target",v)} disabled={isLocked || !canEditDecision("pm_utilization_target")} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="specialized_work_index" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Specialized Capability" tooltip={decisionFieldTooltips.specializedCapability} />} value={form.specialized_work_index} min={0} max={100} onChange={v=>update("specialized_work_index",v)} disabled={isLocked || !canEditDecision("specialized_work_index")} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="work_life_balance_index" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Work-Life Balance" tooltip={decisionFieldTooltips.workLifeBalance} />} value={form.work_life_balance_index} min={0} max={100} onChange={v=>update("work_life_balance_index",v)} disabled={isLocked || !canEditDecision("work_life_balance_index")} /></DecisionOwnershipGate>
                           </div>
                         </div>
-                        <DecisionOwnershipGate decisionKey="subcontractor_profile" currentRole={currentRole} roleAssignments={roleAssignments}>
+                        <DecisionOwnershipGate decisionKey="subcontractor_profile" currentRole={effectiveRole} roleAssignments={roleAssignments}>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Subcontractor Profile</div>
-                          <SegmentedControl options={subcontractorOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.subcontractor_profile} onSelect={(v)=>update("subcontractor_profile",v)} disabled={isLocked || currentRole !== "contracts_manager"} />
+                          <SegmentedControl options={subcontractorOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.subcontractor_profile} onSelect={(v)=>update("subcontractor_profile",v)} disabled={isLocked || !canEditDecision("subcontractor_profile")} />
                         </div>
                         </DecisionOwnershipGate>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Workforce Dynamics</div>
-                          <DecisionOwnershipGate decisionKey="workforce_plan" currentRole={currentRole} roleAssignments={roleAssignments}>
-                            <SegmentedControl options={workforceOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.workforce_plan} onSelect={(v)=>update("workforce_plan",v)} disabled={isLocked || currentRole !== "hse_manager"} />
+                          <DecisionOwnershipGate decisionKey="workforce_plan" currentRole={effectiveRole} roleAssignments={roleAssignments}>
+                            <SegmentedControl options={workforceOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.workforce_plan} onSelect={(v)=>update("workforce_plan",v)} disabled={isLocked || !canEditDecision("workforce_plan")} />
                           </DecisionOwnershipGate>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                            <DecisionOwnershipGate decisionKey="workforce_load_state" currentRole={currentRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Load State</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm text-white font-semibold outline-none" value={form.workforce_load_state} disabled={isLocked || currentRole !== "hse_manager"} onChange={e=>update("workforce_load_state",e.target.value as WorkforceLoadState)}>{workloadOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="qa_audit_frequency" currentRole={currentRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">QA Frequency</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm text-white font-semibold outline-none" value={form.qa_audit_frequency} disabled={isLocked || currentRole !== "planning_manager"} onChange={e=>update("qa_audit_frequency",e.target.value as QaFrequency)}>{qaOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="workforce_load_state" currentRole={effectiveRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">Load State</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm text-white font-semibold outline-none" value={form.workforce_load_state} disabled={isLocked || !canEditDecision("workforce_load_state")} onChange={e=>update("workforce_load_state",e.target.value as WorkforceLoadState)}>{workloadOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="qa_audit_frequency" currentRole={effectiveRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase font-bold tracking-widest text-slate-500 mb-2">QA Frequency</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 text-sm text-white font-semibold outline-none" value={form.qa_audit_frequency} disabled={isLocked || !canEditDecision("qa_audit_frequency")} onChange={e=>update("qa_audit_frequency",e.target.value as QaFrequency)}>{qaOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
                           </div>
                         </div>
-                        <DecisionOwnershipGate decisionKey="overtime_policy" currentRole={currentRole} roleAssignments={roleAssignments}>
+                        <DecisionOwnershipGate decisionKey="overtime_policy" currentRole={effectiveRole} roleAssignments={roleAssignments}>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Overtime Policy</div>
-                          <SegmentedControl options={overtimeOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.overtime_policy} onSelect={(v)=>update("overtime_policy",v)} disabled={isLocked || currentRole !== "hse_manager"} />
+                          <SegmentedControl options={overtimeOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.overtime_policy} onSelect={(v)=>update("overtime_policy",v)} disabled={isLocked || !canEditDecision("overtime_policy")} />
                         </div>
                         </DecisionOwnershipGate>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">L&D and Innovation</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionOwnershipGate decisionKey="training_intensity" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Training Intensity" value={form.training_intensity} min={0} max={100} onChange={v=>update("training_intensity",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="innovation_budget_index" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Innovation Budget" value={form.innovation_budget_index} min={0} max={100} onChange={v=>update("innovation_budget_index",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="training_intensity" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label="Training Intensity" value={form.training_intensity} min={0} max={100} onChange={v=>update("training_intensity",v)} disabled={isLocked || !canEditDecision("training_intensity")} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="innovation_budget_index" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label="Innovation Budget" value={form.innovation_budget_index} min={0} max={100} onChange={v=>update("innovation_budget_index",v)} disabled={isLocked || !canEditDecision("innovation_budget_index")} /></DecisionOwnershipGate>
                           </div>
                         </div>
                      </div>
@@ -3348,31 +3413,31 @@ export default function RoundDecisionPage() {
                         <StepContextBanner>
                           {`🤝 Stakeholder: ${stepProjectContext.client} expects ${stepProjectContext.complexity} compliance`}
                         </StepContextBanner>
-                         <DecisionOwnershipGate decisionKey="logistics_resilience" currentRole={currentRole} roleAssignments={roleAssignments}>
+                         <DecisionOwnershipGate decisionKey="logistics_resilience" currentRole={effectiveRole} roleAssignments={roleAssignments}>
                          <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Logistics & Buffer</div>
-                          <SegmentedControl options={logisticsOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.logistics_resilience} onSelect={(v)=>update("logistics_resilience",v)} disabled={isLocked || currentRole !== "planning_manager"} />
+                          <SegmentedControl options={logisticsOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.logistics_resilience} onSelect={(v)=>update("logistics_resilience",v)} disabled={isLocked || !canEditDecision("logistics_resilience")} />
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                            <DecisionOwnershipGate decisionKey="buffer_percent" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Buffer" tooltip={decisionFieldTooltips.buffer} />} value={form.buffer_percent} min={0} max={15} suffix="%" onChange={v=>update("buffer_percent",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="inventory_cover_weeks" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Inventory Cover" value={form.inventory_cover_weeks} min={1} max={12} suffix="w" onChange={v=>update("inventory_cover_weeks",v)} disabled={isLocked || currentRole !== "planning_manager"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="buffer_percent" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Buffer" tooltip={decisionFieldTooltips.buffer} />} value={form.buffer_percent} min={0} max={15} suffix="%" onChange={v=>update("buffer_percent",v)} disabled={isLocked || !canEditDecision("buffer_percent")} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="inventory_cover_weeks" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label="Inventory Cover" value={form.inventory_cover_weeks} min={1} max={12} suffix="w" onChange={v=>update("inventory_cover_weeks",v)} disabled={isLocked || !canEditDecision("inventory_cover_weeks")} /></DecisionOwnershipGate>
                           </div>
                         </div>
                         </DecisionOwnershipGate>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Stakeholder Engagement</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <DecisionOwnershipGate decisionKey="community_engagement" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Community Engagement" tooltip={decisionFieldTooltips.communityEngagement} />} value={form.community_engagement} min={0} max={100} onChange={v=>update("community_engagement",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="digital_visibility_spend" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Digital Visibility Spend" value={form.digital_visibility_spend} min={0} max={100} onChange={v=>update("digital_visibility_spend",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="csr_sustainability_index" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="CSR & Sustainability" tooltip={decisionFieldTooltips.csrSustainability} />} value={form.csr_sustainability_index} min={0} max={100} onChange={v=>update("csr_sustainability_index",v)} disabled={isLocked || currentRole !== "hse_manager"} /></DecisionOwnershipGate>
-                            <DecisionOwnershipGate decisionKey="facilitation_budget_index" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Facilitation Risk Budget" tooltip={decisionFieldTooltips.facilitationRiskBudget} />} value={form.facilitation_budget_index} min={0} max={100} onChange={v=>update("facilitation_budget_index",v)} disabled={isLocked || currentRole !== "finance_head"} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="community_engagement" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Community Engagement" tooltip={decisionFieldTooltips.communityEngagement} />} value={form.community_engagement} min={0} max={100} onChange={v=>update("community_engagement",v)} disabled={isLocked || !canEditDecision("community_engagement")} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="digital_visibility_spend" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label="Digital Visibility Spend" value={form.digital_visibility_spend} min={0} max={100} onChange={v=>update("digital_visibility_spend",v)} disabled={isLocked || !canEditDecision("digital_visibility_spend")} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="csr_sustainability_index" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="CSR & Sustainability" tooltip={decisionFieldTooltips.csrSustainability} />} value={form.csr_sustainability_index} min={0} max={100} onChange={v=>update("csr_sustainability_index",v)} disabled={isLocked || !canEditDecision("csr_sustainability_index")} /></DecisionOwnershipGate>
+                            <DecisionOwnershipGate decisionKey="facilitation_budget_index" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label={<FieldLabel label="Facilitation Risk Budget" tooltip={decisionFieldTooltips.facilitationRiskBudget} />} value={form.facilitation_budget_index} min={0} max={100} onChange={v=>update("facilitation_budget_index",v)} disabled={isLocked || !canEditDecision("facilitation_budget_index")} /></DecisionOwnershipGate>
                           </div>
                         </div>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Compliance & Transparency</div>
                           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                             <DecisionOwnershipGate decisionKey="compliance_posture" currentRole={currentRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Compliance Posture</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.compliance_posture} disabled={isLocked || currentRole !== "finance_head"} onChange={e=>update("compliance_posture",e.target.value as CompliancePosture)}>{complianceOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
-                             <DecisionOwnershipGate decisionKey="vendor_strategy" currentRole={currentRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Vendor Strategy</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.vendor_strategy} disabled={isLocked || currentRole !== "contracts_manager"} onChange={e=>update("vendor_strategy",e.target.value as VendorStrategy)}>{vendorOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
-                             <DecisionOwnershipGate decisionKey="transparency_level" currentRole={currentRole} roleAssignments={roleAssignments}><div className="flex flex-col lg:col-span-1 md:col-span-2"><span className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">Transparency Mode</span><SegmentedControl options={transparencyOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.transparency_level} onSelect={(v)=>update("transparency_level",v)} disabled={isLocked || currentRole !== "hse_manager"} /></div></DecisionOwnershipGate>
+                             <DecisionOwnershipGate decisionKey="compliance_posture" currentRole={effectiveRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Compliance Posture</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.compliance_posture} disabled={isLocked || !canEditDecision("compliance_posture")} onChange={e=>update("compliance_posture",e.target.value as CompliancePosture)}>{complianceOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
+                             <DecisionOwnershipGate decisionKey="vendor_strategy" currentRole={effectiveRole} roleAssignments={roleAssignments}><div className="flex flex-col"><span className="text-[10px] uppercase tracking-widest font-bold text-slate-500 mb-2">Vendor Strategy</span><select className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white font-semibold outline-none" value={form.vendor_strategy} disabled={isLocked || !canEditDecision("vendor_strategy")} onChange={e=>update("vendor_strategy",e.target.value as VendorStrategy)}>{vendorOptions.map(o=><option key={o} value={o}>{o}</option>)}</select></div></DecisionOwnershipGate>
+                             <DecisionOwnershipGate decisionKey="transparency_level" currentRole={effectiveRole} roleAssignments={roleAssignments}><div className="flex flex-col lg:col-span-1 md:col-span-2"><span className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">Transparency Mode</span><SegmentedControl options={transparencyOptions.map(o=>({value:o.value,text:o.text,hint:o.hint}))} activeOption={form.transparency_level} onSelect={(v)=>update("transparency_level",v)} disabled={isLocked || !canEditDecision("transparency_level")} /></div></DecisionOwnershipGate>
                           </div>
                         </div>
                      </div>
@@ -3388,14 +3453,14 @@ export default function RoundDecisionPage() {
                               : `₹${formatBudgetCr(stepProjectContext.baseBudgetCr)} Cr`
                           } | Rounds remaining: ${roundsRemaining}`}
                         </StepContextBanner>
-                         <DecisionOwnershipGate decisionKey="financing_posture" currentRole={currentRole} roleAssignments={roleAssignments}>
+                         <DecisionOwnershipGate decisionKey="financing_posture" currentRole={effectiveRole} roleAssignments={roleAssignments}>
                          <div className="p-5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-4">
                            <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Financing Strategy</div>
-                           <SegmentedControl options={financingOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.financing_posture} onSelect={(v)=>update("financing_posture",v)} disabled={isLocked || currentRole !== "finance_head"} />
+                           <SegmentedControl options={financingOptions.map(o=>({value:o.value,text:o.text}))} activeOption={form.financing_posture} onSelect={(v)=>update("financing_posture",v)} disabled={isLocked || !canEditDecision("financing_posture")} />
                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                             <DecisionOwnershipGate decisionKey="cash_buffer_months" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Cash Buffer" value={form.cash_buffer_months} min={1} max={12} suffix="m" onChange={v=>update("cash_buffer_months",v)} disabled={isLocked || currentRole !== "finance_head"} /></DecisionOwnershipGate>
-                             <DecisionOwnershipGate decisionKey="contingency_fund_percent" currentRole={currentRole} roleAssignments={roleAssignments}><DecisionSlider label="Contingency Fund" value={form.contingency_fund_percent} min={0} max={20} suffix="%" onChange={v=>update("contingency_fund_percent",v)} disabled={isLocked || currentRole !== "finance_head"} /></DecisionOwnershipGate>
-                           </div>
+                              <DecisionOwnershipGate decisionKey="cash_buffer_months" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label="Cash Buffer" value={form.cash_buffer_months} min={1} max={12} suffix="m" onChange={v=>update("cash_buffer_months",v)} disabled={isLocked || !canEditDecision("cash_buffer_months")} /></DecisionOwnershipGate>
+                              <DecisionOwnershipGate decisionKey="contingency_fund_percent" currentRole={effectiveRole} roleAssignments={roleAssignments}><DecisionSlider label="Contingency Fund" value={form.contingency_fund_percent} min={0} max={20} suffix="%" onChange={v=>update("contingency_fund_percent",v)} disabled={isLocked || !canEditDecision("contingency_fund_percent")} /></DecisionOwnershipGate>
+                            </div>
                         </div>
                         </DecisionOwnershipGate>
                         <div className="p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-4">
@@ -3406,7 +3471,7 @@ export default function RoundDecisionPage() {
                              <div className="flex flex-col"><span className="text-[10px] uppercase text-amber-500/70">Points Expected</span><span className="text-xl font-mono font-bold text-amber-400">+{Math.round(previewResult.points_earned)}</span></div>
                            </div>
                         </div>
-                        <DecisionOwnershipGate decisionKey="forecast" currentRole={currentRole} roleAssignments={roleAssignments}>
+                        <DecisionOwnershipGate decisionKey="forecast" currentRole={effectiveRole} roleAssignments={roleAssignments}>
                         <div className="p-5 rounded-2xl bg-slate-900/40 border border-purple-500/30 space-y-4 mt-6">
                           <div className="text-[10px] font-bold uppercase tracking-widest text-purple-400">Pre-Lock Forecast</div>
                           <p className="text-xs text-slate-400">Before locking, predict your performance. Future rounds will tie point bonuses to prediction calibration.</p>
@@ -3418,7 +3483,7 @@ export default function RoundDecisionPage() {
                                max={1.35}
                                step={0.01}
                                onChange={(v) => { setHasUnsavedChanges(true); setForecast(p => ({...p, predicted_schedule_index: v})); }}
-                               disabled={isLocked || currentRole !== "finance_head"}
+                                disabled={isLocked || !canEditDecision("forecast")}
                                formatValue={(v) => v.toFixed(2)}
                                hint="> 1.0 means ahead of schedule"
                              />
@@ -3429,7 +3494,7 @@ export default function RoundDecisionPage() {
                                max={1.50}
                                step={0.01}
                                onChange={(v) => { setHasUnsavedChanges(true); setForecast(p => ({...p, predicted_cost_index: v})); }}
-                               disabled={isLocked || currentRole !== "finance_head"}
+                                disabled={isLocked || !canEditDecision("forecast")}
                                formatValue={(v) => v.toFixed(2)}
                                hint="> 1.0 means under budget"
                              />
@@ -3440,7 +3505,7 @@ export default function RoundDecisionPage() {
                                max={100}
                                step={5}
                                onChange={(v) => { setHasUnsavedChanges(true); setForecast(p => ({...p, confidence: v})); }}
-                               disabled={isLocked || currentRole !== "finance_head"}
+                                disabled={isLocked || !canEditDecision("forecast")}
                                formatValue={(v) => v + "%"}
                                hint="Over-confidence will be heavily penalized later."
                              />
@@ -3463,7 +3528,7 @@ export default function RoundDecisionPage() {
                        <div className="flex items-center gap-1">
                          {stepTitles.map((title, index) => {
                            const idx = index as StepIndex;
-                           const ownsStep = roleOwnsStep(currentRole, idx + 1);
+                            const ownsStep = roleOwnsStep(effectiveRole, idx + 1);
                            return (
                              <div
                                key={`mobile-progress-${title}`}
@@ -3494,7 +3559,7 @@ export default function RoundDecisionPage() {
                          <Button
                            variant="secondary"
                            onClick={saveDraft}
-                           disabled={saving || isLocked || !currentRole}
+                            disabled={saving || isLocked || !effectiveRole}
                            className="w-full border-slate-700 bg-slate-900 text-slate-200"
                          >
                            {saving ? "Saving..." : "Save Draft"}
@@ -3532,12 +3597,12 @@ export default function RoundDecisionPage() {
                       {stepTitles.map((title, index) => {
                         const idx = index as StepIndex;
                         const current = activeStep === idx;
-                        const ownsStep = roleOwnsStep(currentRole, idx + 1);
+                        const ownsStep = roleOwnsStep(effectiveRole, idx + 1);
                         return (
                           <button
                             key={`sidebar-step-${title}`}
                             type="button"
-                            onClick={() => requestStepNavigation(idx, "stepper-sidebar")}
+                            onClick={() => goToStep(idx, "stepper-sidebar")}
                             className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-3 text-left transition ${
                               current
                                 ? ownsStep
@@ -3665,7 +3730,7 @@ export default function RoundDecisionPage() {
           <footer className="fixed bottom-0 left-0 right-0 z-50 hidden border-t border-white/10 bg-[#020617]/90 p-4 shadow-[0_-20px_40px_rgba(0,0,0,0.5)] backdrop-blur-xl md:block">
             <div className="max-w-[1180px] mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div className="flex items-center justify-between md:justify-start w-full md:w-auto gap-4">
-                <Button variant="ghost" onClick={prevStep} disabled={activeStep === 0 || isLocked} className="text-slate-400 hover:text-white">
+                <Button type="button" variant="ghost" onClick={handleFooterPrevious} disabled={activeStep === 0 || isLocked} className="text-slate-400 hover:text-white">
                   &lt; Previous
                 </Button>
                 <div className="hidden md:flex flex-row gap-1">
@@ -3674,21 +3739,21 @@ export default function RoundDecisionPage() {
                        key={idx}
                        className={`w-8 h-2 rounded-full transition-all ${
                          activeStep === idx
-                           ? roleOwnsStep(currentRole, idx + 1)
+                            ? roleOwnsStep(effectiveRole, idx + 1)
                              ? "bg-teal-400"
                              : "bg-slate-500"
                            : activeStep > idx
-                             ? roleOwnsStep(currentRole, idx + 1)
+                              ? roleOwnsStep(effectiveRole, idx + 1)
                                ? "bg-teal-700"
                                : "bg-slate-700"
-                             : roleOwnsStep(currentRole, idx + 1)
+                              : roleOwnsStep(effectiveRole, idx + 1)
                                ? "bg-teal-950"
                                : "bg-slate-800"
                        }`}
                      />
                   ))}
                 </div>
-                <Button variant="ghost" onClick={nextStep} disabled={activeStep === 4 || isLocked} className="text-slate-400 hover:text-white">
+                <Button type="button" variant="ghost" onClick={handleFooterNext} disabled={activeStep === 4 || isLocked} className="text-slate-400 hover:text-white">
                   Next &gt;
                 </Button>
               </div>
@@ -3709,11 +3774,11 @@ export default function RoundDecisionPage() {
                          <span className="text-emerald-500 uppercase">Input Accepted</span>
                        )}
                      </div>
-                     <Button variant="secondary" onClick={saveDraft} disabled={saving || isLocked || !currentRole} className="w-full md:w-auto border-slate-700 bg-slate-900 text-slate-300 py-3 text-[11px] tracking-widest">
+                      <Button type="button" variant="secondary" onClick={saveDraft} disabled={saving || isLocked || !effectiveRole} className="w-full md:w-auto border-slate-700 bg-slate-900 text-slate-300 py-3 text-[11px] tracking-widest">
                        {saving ? "SAVING..." : "SAVE DRAFT"}
                      </Button>
                      {isProjectDirector ? (
-                       <Button onClick={openLockConfirmation} disabled={locking || saving || isLocked || !stepValidations[4] || !allAssignedRolesReady} className="w-full md:w-auto shadow-blue-500/40 py-3 text-[11px] tracking-widest">
+                        <Button type="button" onClick={openLockConfirmation} disabled={locking || saving || isLocked || !stepValidations[4] || !allAssignedRolesReady} className="w-full md:w-auto shadow-blue-500/40 py-3 text-[11px] tracking-widest">
                          {locking ? "INITIALIZING..." : lockBlockedByDeadline ? "WINDOW CLOSED" : "LOCK AND GENERATE RESULTS"}
                        </Button>
                      ) : (
